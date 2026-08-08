@@ -576,14 +576,14 @@ window.customCards.push(
     name: 'Linked Card',
     description: 'Renders a card defined elsewhere by its card_id. Edit the source once; all linked copies update automatically.',
     preview: false,
-    documentationURL: 'https://github.com/your-username/linked-card',
+    documentationURL: 'https://github.com/Alpacinator/lovelace-linked-cards',
   },
   {
     type: 'linked-section',
     name: 'Linked Section',
     description: 'Renders all cards from a section defined elsewhere by its section_id. Edit the source section; all linked copies update automatically.',
     preview: false,
-    documentationURL: 'https://github.com/your-username/linked-card',
+    documentationURL: 'https://github.com/Alpacinator/lovelace-linked-cards',
   }
 );
 
