@@ -23,7 +23,7 @@ When you edit the source, every linked copy reflects the change immediately.
 1. Open HACS in your Home Assistant instance.
 2. Go to **Frontend**.
 3. Click the three-dot menu and choose **Custom repositories**.
-4. Add `https://github.com/Alpacinator/lovelace-linked-cards` with category **Lovelace**.
+4. Add `https://github.com/Alpacinator/lovelace-linked-cards` with category **Dashboard**.
 5. Install **Linked Cards** and reload your browser.
 
 ### Manual
