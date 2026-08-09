@@ -20,6 +20,37 @@
 
 ---
 
+## Quick start
+
+Label any existing card with a `card_id`:
+
+```yaml
+type: entities
+card_id: my-card
+```
+
+Or label any existing section with a `section_id`:
+
+```yaml
+section_id: my-section
+cards:
+  - ...
+```
+
+Then place a linked copy anywhere using that name:
+
+```yaml
+type: custom:linked-card
+linked_card_id: my-card
+```
+
+```yaml
+type: custom:linked-section
+linked_section_id: my-section
+```
+
+---
+
 ## Installation
 
 ### Via HACS (recommended)
