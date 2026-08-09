@@ -7,7 +7,13 @@
   <a href="https://github.com/Alpacinator/lovelace-linked-cards/stargazers"><img src="https://img.shields.io/github/stars/Alpacinator/lovelace-linked-cards" /></a>
 </p>
 
-<p align="center">Define a card or section once. Reference it from anywhere. Edit the source and every linked copy updates instantly.</p>
+<p align="center">
+  <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=Alpacinator&repository=lovelace-linked-cards&category=dashboard">
+    <img src="https://my.home-assistant.io/badges/hacs_repository.svg" alt="Add to HACS" />
+  </a>
+</p>
+
+<p align="center">Create and define a card or section once. Reference and mirror it from anywhere. Edit the source and every linked copy updates instantly.</p>
 
 ---
 
