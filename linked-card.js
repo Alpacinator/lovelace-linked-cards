@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.1.0';
+const PLUGIN_VERSION = '2.2.0';
 
 // ------------------------------------------------------------------ global cache --
 
@@ -113,10 +113,11 @@ function getViewLabel(view, index) {
 }
 
 function getCardLabel(card, index) {
-  if (card.name || card.title || card.heading) {
-    return card.name || card.title || card.heading;
-  }
-  return `${card.type || 'card'} #${index + 1} (unnamed - add a name to link this card)`;
+  return card.name
+    || card.title
+    || card.heading
+    || (card.entity ? `${card.type} (${card.entity})` : null)
+    || `${card.type || 'card'} #${index + 1} (unnamed - add a name to link this card)`;
 }
 
 function getSectionLabel(section, index) {
