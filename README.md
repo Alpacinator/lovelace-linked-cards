@@ -1,18 +1,15 @@
 <h1 align="center">Linked Cards</h1>
-
 <p align="center">
   <a href="https://github.com/hacs/integration"><img src="https://img.shields.io/badge/HACS-Custom-orange.svg" /></a>
   <a href="https://github.com/Alpacinator/lovelace-linked-cards/releases"><img src="https://img.shields.io/github/v/release/Alpacinator/lovelace-linked-cards" /></a>
   <a href="https://github.com/Alpacinator/lovelace-linked-cards/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Alpacinator/lovelace-linked-cards" /></a>
   <a href="https://github.com/Alpacinator/lovelace-linked-cards/stargazers"><img src="https://img.shields.io/github/stars/Alpacinator/lovelace-linked-cards" /></a>
 </p>
-
 <p align="center">
   <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=Alpacinator&repository=lovelace-linked-cards&category=dashboard">
     <img src="https://my.home-assistant.io/badges/hacs_repository.svg" alt="Add to HACS" />
   </a>
 </p>
-
 <p align="center">Create and define a card or section once. Reference and mirror it from anywhere. Edit the source and every linked copy updates instantly.</p>
 
 ---
@@ -77,6 +74,13 @@ linked_section_id: my-section
 
 ## Usage
 
+### Adding a card via the UI
+
+Both **Linked Card** and **Linked Section** appear in the Home Assistant card picker. After selecting one, the visual editor shows a dropdown of all `card_id` or `section_id` values it finds across your dashboards — no need to type anything manually. Just pick the source from the list and the card is ready.
+
+> [!NOTE]
+> The dropdown only shows IDs from UI-managed (storage-mode) dashboards. YAML-mode dashboards are not readable via the WebSocket API.
+
 ### custom:linked-card
 
 Add `card_id` to any existing card to make it the source:
@@ -138,9 +142,6 @@ linked_section_id: bedroom-controls
 ---
 
 ## Limitations
-
-> [!NOTE]
-> Only **UI-managed (storage-mode) dashboards** are searchable. YAML-mode dashboards cannot be read via the WebSocket API.
 
 > [!WARNING]
 > The source card for `custom:linked-card` cannot itself be a `custom:linked-card` — circular references are blocked.
