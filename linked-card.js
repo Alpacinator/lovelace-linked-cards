@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.0.1';
+const PLUGIN_VERSION = '2.0.2';
 
 // ------------------------------------------------------------------ global cache --
 
@@ -92,7 +92,12 @@ function getViewId(view, index) {
 }
 
 function getCardId(card, index) {
-  return card.name || card.title || card.heading || null;
+  return card.name || card.title || card.heading || `${card.type || 'card'}::${index}`;
+}
+
+function isCardIdGenerated(id) {
+  // Returns true if the id is a generated fallback, not a real name
+  return id && id.includes('::');
 }
 
 function getSectionId(section, index) {
@@ -104,8 +109,10 @@ function getViewLabel(view, index) {
 }
 
 function getCardLabel(card, index) {
-  const id = getCardId(card, index);
-  return id || `${card.type || 'Card'} #${index + 1} (no name)`;
+  if (card.name || card.title || card.heading) {
+    return card.name || card.title || card.heading;
+  }
+  return `${card.type || 'card'} #${index + 1} (unnamed - add a name to link this card)`;
 }
 
 function getSectionLabel(section, index) {
@@ -117,7 +124,15 @@ function findViewByIdInConfig(dashConfig, viewId) {
 }
 
 function findCardByIdInView(view, cardId) {
-  return (view?.cards ?? []).find((c, i) => getCardId(c, i) === cardId) ?? null;
+  // Search top-level cards first
+  const inCards = (view?.cards ?? []).find((c, i) => getCardId(c, i) === cardId);
+  if (inCards) return inCards;
+  // Also search inside sections (sections layout)
+  for (const section of view?.sections ?? []) {
+    const inSection = (section.cards ?? []).find((c, i) => getCardId(c, i) === cardId);
+    if (inSection) return inSection;
+  }
+  return null;
 }
 
 function findSectionByIdInView(view, sectionId) {
@@ -727,7 +742,12 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
 buildEditor(
   'linked-card-editor',
   'card',
-  (view) => (view.cards ?? []).filter((c, i) => getCardId(c, i) !== null),
+  (view) => {
+    // Collect cards from top-level and from inside sections
+    const topLevel = view.cards ?? [];
+    const inSections = (view.sections ?? []).flatMap((s) => s.cards ?? []);
+    return [...topLevel, ...inSections];
+  },
   getCardId,
   getCardLabel
 );
