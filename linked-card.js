@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.5.8';
+const PLUGIN_VERSION = '2.6.0.0';
 
 // ----------------------------------------------------------------- version check --
 // Compares the running version against the last seen version in localStorage.
