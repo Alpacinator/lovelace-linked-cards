@@ -12,16 +12,12 @@
 </p>
 <p align="center">Create and define a card or section once. Reference and mirror it from anywhere. Edit the source and every linked copy updates instantly.</p>
 
----
-
 ## Card types
 
 | Type | What it links | Source marker |
 |---|---|---|
 | `custom:linked-card` | A single card | `card_id` on the source card |
 | `custom:linked-section` | All cards in a section | `section_id` on the source section |
-
----
 
 ## Quick start
 
@@ -52,8 +48,6 @@ type: custom:linked-section
 linked_section_id: my-section
 ```
 
----
-
 ## Installation
 
 ### Via HACS (recommended)
@@ -70,13 +64,11 @@ linked_section_id: my-section
 2. In **Settings > Dashboards > Resources** add `/local/linked-card/linked-card.js` as a **JavaScript module**
 3. Reload your browser
 
----
-
 ## Usage
 
 ### Adding a card via the UI
 
-Both **Linked Card** and **Linked Section** appear in the Home Assistant card picker. After selecting one, the visual editor shows a dropdown of all `card_id` or `section_id` values it finds across your dashboards — no need to type anything manually. Just pick the source from the list and the card is ready.
+Both **Linked Card** and **Linked Section** appear in the Home Assistant card picker. After selecting one, the visual editor shows a dropdown of all `card_id` or `section_id` values it finds across your dashboards. Just pick the source from the list and the card is ready.
 
 > [!NOTE]
 > The dropdown only shows IDs from UI-managed (storage-mode) dashboards. YAML-mode dashboards are not readable via the WebSocket API.
@@ -123,8 +115,6 @@ type: custom:linked-section
 linked_section_id: bedroom-controls
 ```
 
----
-
 ## Options
 
 ### custom:linked-card
@@ -139,17 +129,13 @@ linked_section_id: bedroom-controls
 |---|---|---|---|
 | `linked_section_id` | string | yes | The `section_id` of the source section |
 
----
-
 ## Limitations
 
 > [!WARNING]
-> The source card for `custom:linked-card` cannot itself be a `custom:linked-card` — circular references are blocked.
+> The source card for `custom:linked-card` cannot itself be a `custom:linked-card`. Circular references are blocked.
 
 > [!TIP]
 > `custom:linked-section` renders cards in a vertical stack regardless of the column layout of the source section. This is expected behaviour.
-
----
 
 ## License
 
