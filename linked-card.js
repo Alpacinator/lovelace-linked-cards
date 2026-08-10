@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.0.2';
+const PLUGIN_VERSION = '2.1.0';
 
 // ------------------------------------------------------------------ global cache --
 
@@ -101,7 +101,11 @@ function isCardIdGenerated(id) {
 }
 
 function getSectionId(section, index) {
-  return section.title || null;
+  return section.title || `section::${index}`;
+}
+
+function isSectionIdGenerated(id) {
+  return id && id.startsWith('section::');
 }
 
 function getViewLabel(view, index) {
@@ -116,7 +120,9 @@ function getCardLabel(card, index) {
 }
 
 function getSectionLabel(section, index) {
-  return getSectionId(section, index) || `Section ${index + 1} (no title)`;
+  if (section.title) return section.title;
+  const cardCount = (section.cards ?? []).length;
+  return `Section ${index + 1} (untitled, ${cardCount} card${cardCount !== 1 ? 's' : ''})`;
 }
 
 function findViewByIdInConfig(dashConfig, viewId) {
@@ -263,6 +269,18 @@ class LinkedBase extends HTMLElement {
     this.insertBefore(overlay, this.firstChild);
   }
 
+  _renderPlaceholder(message) {
+    this.innerHTML = `
+      <ha-card>
+        <div class="lc-message">
+          <ha-icon icon="mdi:link-variant"></ha-icon>
+          <span>${message}</span>
+        </div>
+      </ha-card>
+      ${sharedStyles()}
+    `;
+  }
+
   _renderLoading() {
     this.innerHTML = `
       <ha-card>
@@ -339,8 +357,6 @@ class LinkedCard extends LinkedBase {
   }
 
   setConfig(config) {
-    if (!config.card) throw new Error('[linked-card] card name is required.');
-    if (!config.view) throw new Error('[linked-card] view is required.');
     const changed =
       this._config?.dashboard !== config.dashboard ||
       this._config?.view      !== config.view      ||
@@ -375,6 +391,13 @@ class LinkedCard extends LinkedBase {
 
   async _doLoad() {
     const { dashboard = null, view: viewId, card: cardId } = this._config;
+
+    if (!cardId || !viewId) {
+      this._renderPlaceholder('Select a dashboard, view, and card in the editor.');
+      this._state = 'ready';
+      return;
+    }
+
     const dashConfig = await getDashboardConfig(this._hass, dashboard);
 
     if (!dashConfig) {
@@ -434,8 +457,6 @@ class LinkedSection extends LinkedBase {
   }
 
   setConfig(config) {
-    if (!config.section) throw new Error('[linked-section] section name is required.');
-    if (!config.view)    throw new Error('[linked-section] view is required.');
     const changed =
       this._config?.dashboard !== config.dashboard ||
       this._config?.view      !== config.view      ||
@@ -470,6 +491,13 @@ class LinkedSection extends LinkedBase {
 
   async _doLoad() {
     const { dashboard = null, view: viewId, section: sectionId } = this._config;
+
+    if (!sectionId || !viewId) {
+      this._renderPlaceholder('Select a dashboard, view, and section in the editor.');
+      this._state = 'ready';
+      return;
+    }
+
     const dashConfig = await getDashboardConfig(this._hass, dashboard);
 
     if (!dashConfig) {
@@ -645,9 +673,11 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
 
       const itemOptions = this._items.map((item, i) => {
         const id = getItemId(item, i);
-        if (!id) return ''; // skip unnamed items? No - show them but note they can't be linked
+        if (!id) return '';
         return `<option value="${id}" ${id === itemId ? 'selected' : ''}>${getItemLabel(item, i)}</option>`;
       }).filter(Boolean).join('') || '<option disabled>None found</option>';
+
+      const itemPlaceholder = `<option value="" ${!itemId ? 'selected' : ''} disabled>-- select a ${itemField === 'card' ? 'card' : 'section'} --</option>`;
 
       const itemLabel = itemField === 'card' ? 'Card' : 'Section';
 
@@ -663,7 +693,7 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
           </label>
           <label class="lc-label">
             ${itemLabel}
-            <select class="lc-select" id="lc-item" ${!this._items.length ? 'disabled' : ''}>${itemOptions}</select>
+            <select class="lc-select" id="lc-item" ${!this._items.length ? 'disabled' : ''}>${itemPlaceholder}${itemOptions}</select>
           </label>
           ${itemField === 'card' ? `<p class="lc-hint">Only cards with a name, title, or heading are listed. Add a <code>name</code> to any card to make it available here.</p>` : ''}
           ${this._error ? `
@@ -755,7 +785,7 @@ buildEditor(
 buildEditor(
   'linked-section-editor',
   'section',
-  (view) => (view.sections ?? []).filter((s, i) => getSectionId(s, i) !== null),
+  (view) => view.sections ?? [],
   getSectionId,
   getSectionLabel
 );
