@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.6.3';
+const PLUGIN_VERSION = '2.6.4';
 
 // ----------------------------------------------------------------- version check --
 // Compares the running version against the last seen version in localStorage.
@@ -979,29 +979,37 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
                   const sectionIndex = pathWithinView.length === 2 ? pathWithinView[0] : 0;
                   const cardIndex    = pathWithinView[pathWithinView.length - 1];
 
-                  // hui-section has its own shadow DOM, so we need to pierce into it
+                  // Recursively find all hui-card elements across all shadow roots
+                  function findAllHuiCards(root, results = []) {
+                    if (!root) return results;
+                    const shadow = root.shadowRoot ?? root;
+                    shadow.querySelectorAll('hui-card').forEach(c => results.push(c));
+                    shadow.querySelectorAll('*').forEach(el => {
+                      if (el.shadowRoot) findAllHuiCards(el, results);
+                    });
+                    return results;
+                  }
+
+                  const allCards = findAllHuiCards(huiView);
+                  console.log('[linked-cards] Total hui-card elements found recursively:', allCards.length);
+
+                  // Also log section structure
                   const sections = huiView?.shadowRoot?.querySelectorAll('hui-section');
-                  console.log('[linked-cards] Sections found:', sections?.length ?? 0);
+                  console.log('[linked-cards] hui-section elements:', sections?.length ?? 0);
+                  sections?.forEach((s, i) => {
+                    const c = s.shadowRoot?.querySelectorAll('hui-card');
+                    console.log(`  section ${i}: ${c?.length ?? 0} hui-card(s) in shadow`);
+                  });
 
-                  const sectionEl = sections?.[sectionIndex];
-                  console.log('[linked-cards] Target section:', sectionEl ? sectionEl.tagName : 'NOT FOUND');
-
-                  // Cards are inside hui-section's shadow DOM
-                  const cards = sectionEl?.shadowRoot?.querySelectorAll('hui-card');
-                  console.log('[linked-cards] hui-card elements in section:', cards?.length ?? 0);
-
-                  const cardEl = cards?.[cardIndex];
-                  console.log('[linked-cards] Target hui-card:', cardEl ? 'found' : 'NOT FOUND');
+                  const cardEl = allCards[cardIndex];
+                  console.log('[linked-cards] Target hui-card by flat index', cardIndex, ':', cardEl ? 'found' : 'NOT FOUND');
 
                   if (cardEl) {
-                    // Fire ll-edit-card on the card element
                     cardEl.dispatchEvent(new CustomEvent('ll-edit-card', {
                       detail: { path: pathWithinView }, bubbles: true, composed: true,
                     }));
-
-                    // Try clicking the edit button directly
                     const editBtn = cardEl.shadowRoot?.querySelector('ha-icon-button');
-                    console.log('[linked-cards] Edit button in hui-card shadow:', editBtn ? 'found' : 'NOT FOUND');
+                    console.log('[linked-cards] Edit button:', editBtn ? 'found' : 'NOT FOUND');
                     editBtn?.click();
                   }
                 } catch (e) {
