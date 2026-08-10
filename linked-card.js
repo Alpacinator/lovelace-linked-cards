@@ -19,7 +19,25 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.3.3';
+const PLUGIN_VERSION = '2.5.0';
+
+// ----------------------------------------------------------------- version check --
+// Compares the running version against the last seen version in localStorage.
+// If they differ, a persistent HA notification is created asking the user to reload.
+// This catches the case where HACS updated the file but the app state is stale.
+const LC_VERSION_KEY = 'linked-cards-plugin-version';
+try {
+  const lastVersion = localStorage.getItem(LC_VERSION_KEY);
+  if (lastVersion && lastVersion !== PLUGIN_VERSION) {
+    console.info(
+      `[linked-cards] Updated from v${lastVersion} to v${PLUGIN_VERSION}. ` +
+      `A full page reload is recommended.`
+    );
+    // We don't have hass yet at module load time, so store a flag and notify later
+    localStorage.setItem('linked-cards-needs-reload', '1');
+  }
+  localStorage.setItem(LC_VERSION_KEY, PLUGIN_VERSION);
+} catch (_) {}
 
 // ------------------------------------------------------------------ global cache --
 
@@ -182,6 +200,23 @@ function bustDashboardCache(urlPath) {
   _dashboardCache.delete(pathKey(urlPath));
 }
 
+// -------------------------------------------------------- reload notification --
+
+let _reloadNotified = false;
+function _notifyReloadIfNeeded(hass) {
+  if (_reloadNotified) return;
+  try {
+    if (localStorage.getItem('linked-cards-needs-reload') !== '1') return;
+    _reloadNotified = true;
+    localStorage.removeItem('linked-cards-needs-reload');
+    hass.callService('persistent_notification', 'create', {
+      title: 'Linked Cards updated',
+      message: `Linked Cards was updated to v${PLUGIN_VERSION}. Please reload the page to avoid issues with cached files.`,
+      notification_id: 'linked_cards_update',
+    });
+  } catch (_) {}
+}
+
 // ---------------------------------------------------- shared base class -----
 
 class LinkedBase extends HTMLElement {
@@ -199,6 +234,7 @@ class LinkedBase extends HTMLElement {
     this._onHassUpdated(hass);
     if (this._state === 'idle') this._load();
     else if (this._state === 'ready') this._syncEditOverlay();
+    _notifyReloadIfNeeded(hass);
   }
 
   _onHassUpdated(_hass) {}
@@ -733,6 +769,7 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
               <button class="lc-retry-btn">Retry</button>
             </div>
           ` : ''}
+          <button class="lc-reload-btn" id="lc-hard-reload">Force reload page</button>
         </div>
         <style>
           .lc-editor { display: flex; flex-direction: column; gap: 12px; padding: 8px 0; font-size: 14px; }
@@ -763,6 +800,12 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
             padding: 6px 12px; font-size: 13px; cursor: pointer; width: 100%;
           }
           .lc-goto-btn:hover { background: var(--primary-color, #2196f3); color: #fff; }
+          .lc-reload-btn {
+            background: none; border: 1px solid var(--divider-color);
+            color: var(--secondary-text-color); border-radius: 4px;
+            padding: 6px 12px; font-size: 12px; cursor: pointer; width: 100%;
+          }
+          .lc-reload-btn:hover { border-color: var(--primary-color); color: var(--primary-color); }
         </style>
       `;
 
@@ -790,6 +833,13 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
         bustDashboardCache(dashboard);
         this._error = null;
         this._loadDashboards();
+      });
+
+      this.querySelector('#lc-hard-reload')?.addEventListener('click', () => {
+        // Force a hard reload by appending a cache-busting query parameter
+        const url = new URL(window.location.href);
+        url.searchParams.set('_lc_reload', Date.now());
+        window.location.href = url.toString();
       });
 
       this.querySelector('#lc-goto')?.addEventListener('click', async () => {
@@ -829,60 +879,75 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
         const view       = findViewByIdInConfig(dashConfig, viewId);
         if (!view) return;
 
-        // Navigate to the source view first
+        // Navigate to the source view
         const url = buildViewUrl(dashboard, view, dashConfig.views);
+        console.log('[linked-cards] Navigating to source view:', url);
         history.pushState(null, '', url);
         window.dispatchEvent(new PopStateEvent('popstate'));
 
         setTimeout(() => {
           try {
-            const root = document
-              .querySelector('home-assistant')
-              ?.shadowRoot?.querySelector('home-assistant-main')
-              ?.shadowRoot?.querySelector('ha-panel-lovelace')
-              ?.shadowRoot?.querySelector('hui-root');
-            if (!root) return;
+            const ha       = document.querySelector('home-assistant');
+            const haMain   = ha?.shadowRoot?.querySelector('home-assistant-main');
+            const haPanel  = haMain?.shadowRoot?.querySelector('ha-panel-lovelace');
+            const huiRoot  = haPanel?.shadowRoot?.querySelector('hui-root');
 
-            // Enter edit mode first
-            root.dispatchEvent(new CustomEvent('ll-edit-mode-changed', {
+            console.log('[linked-cards] Shadow DOM traversal:');
+            console.log('  home-assistant:      ', ha      ? 'found' : 'NOT FOUND');
+            console.log('  home-assistant-main: ', haMain  ? 'found' : 'NOT FOUND');
+            console.log('  ha-panel-lovelace:   ', haPanel ? 'found' : 'NOT FOUND');
+            console.log('  hui-root:            ', huiRoot ? 'found' : 'NOT FOUND');
+
+            if (!huiRoot) {
+              console.warn('[linked-cards] Could not find hui-root - edit mode and card editor unavailable');
+              return;
+            }
+
+            // Enter edit mode
+            console.log('[linked-cards] Firing ll-edit-mode-changed on hui-root');
+            huiRoot.dispatchEvent(new CustomEvent('ll-edit-mode-changed', {
               detail: { value: true },
               bubbles: true,
               composed: true,
             }));
 
-            // Find the card index by matching its id, checking both top-level
-            // cards and cards inside sections
-            const views    = dashConfig.views ?? [];
+            // Find card index
+            const views     = dashConfig.views ?? [];
             const viewIndex = views.indexOf(view);
-            let cardIndex  = (view.cards ?? []).findIndex((c, i) => getCardId(c, i) === cardId);
+            let cardIndex   = (view.cards ?? []).findIndex((c, i) => getCardId(c, i) === cardId);
             let path;
 
             if (cardIndex !== -1) {
               path = [viewIndex, cardIndex];
+              console.log('[linked-cards] Card found in view.cards at index', cardIndex, '- path:', path);
             } else {
-              // Check inside sections
               const sections = view.sections ?? [];
               for (let si = 0; si < sections.length; si++) {
                 cardIndex = (sections[si].cards ?? []).findIndex((c, i) => getCardId(c, i) === cardId);
                 if (cardIndex !== -1) {
                   path = [viewIndex, si, cardIndex];
+                  console.log('[linked-cards] Card found in section', si, 'at index', cardIndex, '- path:', path);
                   break;
                 }
               }
             }
 
-            if (path) {
-              // Small extra delay to let edit mode settle before opening the dialog
-              setTimeout(() => {
-                root.dispatchEvent(new CustomEvent('ll-edit-card', {
-                  detail: { path },
-                  bubbles: true,
-                  composed: true,
-                }));
-              }, 200);
+            if (!path) {
+              console.warn('[linked-cards] Could not find card with id:', cardId, 'in view:', viewId);
+              return;
             }
-          } catch (_) {
-            // Silently ignore if HA's internal structure has changed
+
+            setTimeout(() => {
+              console.log('[linked-cards] Firing ll-edit-card with path:', path);
+              huiRoot.dispatchEvent(new CustomEvent('ll-edit-card', {
+                detail: { path },
+                bubbles: true,
+                composed: true,
+              }));
+            }, 200);
+
+          } catch (e) {
+            console.error('[linked-cards] Error while trying to open card editor:', e);
           }
         }, 300);
       });
