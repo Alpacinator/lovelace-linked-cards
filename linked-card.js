@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.6.2';
+const PLUGIN_VERSION = '2.6.3';
 
 // ----------------------------------------------------------------- version check --
 // Compares the running version against the last seen version in localStorage.
@@ -979,26 +979,29 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
                   const sectionIndex = pathWithinView.length === 2 ? pathWithinView[0] : 0;
                   const cardIndex    = pathWithinView[pathWithinView.length - 1];
 
-                  const sections = huiView?.shadowRoot?.querySelectorAll('hui-section, [class*="section"]');
-                  console.log('[linked-cards] Sections found in shadow DOM:', sections?.length ?? 0);
+                  // hui-section has its own shadow DOM, so we need to pierce into it
+                  const sections = huiView?.shadowRoot?.querySelectorAll('hui-section');
+                  console.log('[linked-cards] Sections found:', sections?.length ?? 0);
 
                   const sectionEl = sections?.[sectionIndex];
-                  const cards     = sectionEl?.shadowRoot?.querySelectorAll('hui-card') 
-                    ?? huiView?.shadowRoot?.querySelectorAll('hui-card');
-                  console.log('[linked-cards] hui-card elements found:', cards?.length ?? 0);
+                  console.log('[linked-cards] Target section:', sectionEl ? sectionEl.tagName : 'NOT FOUND');
+
+                  // Cards are inside hui-section's shadow DOM
+                  const cards = sectionEl?.shadowRoot?.querySelectorAll('hui-card');
+                  console.log('[linked-cards] hui-card elements in section:', cards?.length ?? 0);
 
                   const cardEl = cards?.[cardIndex];
                   console.log('[linked-cards] Target hui-card:', cardEl ? 'found' : 'NOT FOUND');
 
                   if (cardEl) {
-                    // Try firing ll-edit-card on the card element itself
+                    // Fire ll-edit-card on the card element
                     cardEl.dispatchEvent(new CustomEvent('ll-edit-card', {
                       detail: { path: pathWithinView }, bubbles: true, composed: true,
                     }));
 
-                    // Also try finding and clicking the edit button inside the card
-                    const editBtn = cardEl.shadowRoot?.querySelector('ha-icon-button[label="Edit"], .edit-icon, [data-action="edit"]');
-                    console.log('[linked-cards] Edit button inside hui-card:', editBtn ? 'found' : 'NOT FOUND');
+                    // Try clicking the edit button directly
+                    const editBtn = cardEl.shadowRoot?.querySelector('ha-icon-button');
+                    console.log('[linked-cards] Edit button in hui-card shadow:', editBtn ? 'found' : 'NOT FOUND');
                     editBtn?.click();
                   }
                 } catch (e) {
