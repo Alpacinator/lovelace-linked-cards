@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.0.0';
+const PLUGIN_VERSION = '2.0.1';
 
 // ------------------------------------------------------------------ global cache --
 
@@ -550,6 +550,7 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
       this._dashboards = [];
       this._views      = [];
       this._items      = [];
+      this._error      = null;
     }
 
     setConfig(config) {
@@ -564,21 +565,48 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
 
     async _loadDashboards() {
       if (!this._hass) return;
-      this._dashboards = await listDashboards(this._hass);
+      this._error = null;
+      try {
+        this._dashboards = await listDashboards(this._hass);
+      } catch (e) {
+        this._error = `Could not list dashboards: ${e.message}`;
+        this._render();
+        return;
+      }
       await this._loadViews();
     }
 
     async _loadViews() {
-      const dashboard  = this._config.dashboard ?? null;
-      const dashConfig = await getDashboardConfig(this._hass, dashboard);
-      this._views      = dashConfig?.views ?? [];
+      const dashboard = this._config.dashboard ?? null;
+      let dashConfig;
+      try {
+        dashConfig = await getDashboardConfig(this._hass, dashboard);
+      } catch (e) {
+        this._error = `Could not load dashboard: ${e.message}`;
+        this._render();
+        return;
+      }
+      if (!dashConfig) {
+        this._error = 'Dashboard returned no config. Make sure it is UI-managed (not YAML mode).';
+        this._render();
+        return;
+      }
+      this._error  = null;
+      this._views  = dashConfig?.views ?? [];
       await this._loadItems();
     }
 
     async _loadItems() {
       const dashboard  = this._config.dashboard ?? null;
       const viewId     = this._config.view ?? '';
-      const dashConfig = await getDashboardConfig(this._hass, dashboard);
+      let dashConfig;
+      try {
+        dashConfig = await getDashboardConfig(this._hass, dashboard);
+      } catch (e) {
+        this._error = `Could not load dashboard: ${e.message}`;
+        this._render();
+        return;
+      }
       const view       = findViewByIdInConfig(dashConfig, viewId)
                          ?? dashConfig?.views?.[0]
                          ?? null;
@@ -623,6 +651,13 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
             <select class="lc-select" id="lc-item" ${!this._items.length ? 'disabled' : ''}>${itemOptions}</select>
           </label>
           ${itemField === 'card' ? `<p class="lc-hint">Only cards with a name, title, or heading are listed. Add a <code>name</code> to any card to make it available here.</p>` : ''}
+          ${this._error ? `
+            <div class="lc-error-box">
+              <strong>Error loading dashboards</strong>
+              <p>${this._error}</p>
+              <button class="lc-retry-btn">Retry</button>
+            </div>
+          ` : ''}
         </div>
         <style>
           .lc-editor { display: flex; flex-direction: column; gap: 12px; padding: 8px 0; font-size: 14px; }
@@ -635,6 +670,18 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
             font-size: 14px; width: 100%;
           }
           .lc-select:disabled { opacity: 0.5; }
+          .lc-error-box {
+            background: var(--error-color, #db4437); color: #fff;
+            padding: 10px 12px; border-radius: 4px; font-size: 12px;
+          }
+          .lc-error-box p { margin: 4px 0 8px; opacity: 0.9; }
+          .lc-error-box strong { font-size: 13px; }
+          .lc-retry-btn {
+            background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.5);
+            color: #fff; border-radius: 4px; padding: 3px 10px;
+            font-size: 12px; cursor: pointer;
+          }
+          .lc-retry-btn:hover { background: rgba(255,255,255,0.35); }
         </style>
       `;
 
@@ -654,6 +701,14 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
       this.querySelector('#lc-item')?.addEventListener('change', (e) => {
         this._config = { ...this._config, [itemField]: e.target.value };
         this._fire();
+      });
+
+      this.querySelector('.lc-retry-btn')?.addEventListener('click', () => {
+        // Bust the dashboard cache so we actually re-fetch
+        const dashboard = this._config.dashboard ?? null;
+        bustDashboardCache(dashboard);
+        this._error = null;
+        this._loadDashboards();
       });
     }
 
