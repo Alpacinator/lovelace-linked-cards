@@ -30,21 +30,36 @@
  *       linked_section_id: bedroom-controls
  */
 
-const CACHE_TTL_MS = 30_000;
-const PLUGIN_VERSION = '1.2.0';
+const CACHE_TTL_MS    = 30_000;
+const PLUGIN_VERSION  = '1.3.0';
 
 // ------------------------------------------------------------------ global cache --
-// All linked-card and linked-section instances on the page share a single fetch
-// for dashboard configs. No matter how many cards are on the page, only one set
-// of WebSocket calls is made per TTL window.
+// All instances share one fetch. No matter how many cards are on a view,
+// only one set of WebSocket calls is made per TTL window.
 
-let _dashboardConfigs = null;      // cached array of all dashboard configs
-let _dashboardCacheTs  = 0;        // timestamp of last successful fetch
-let _dashboardPending  = null;     // in-flight promise, shared across all instances
+let _dashboardConfigs = null;
+let _dashboardCacheTs = 0;
+let _dashboardPending = null;
 
-// Per-id result cache so we don't re-search all configs for the same id every time.
+// Per-id result cache: key -> source config (card or section)
 // key: `card::<id>` or `section::<id>`
 const _resultCache = new Map();
+
+// Rendered element cache: key -> { element, childCards }
+// Keeps built card/section elements alive between view switches so
+// navigating back to a view is instant - no re-fetch, no re-render.
+const _elementCache = new Map();
+
+// Pre-warmed card helpers promise - resolved once, reused everywhere
+let _helpersPromise = null;
+
+function getHelpers() {
+  if (!_helpersPromise) _helpersPromise = window.loadCardHelpers();
+  return _helpersPromise;
+}
+
+// Pre-warm helpers immediately at module load time
+getHelpers();
 
 // ------------------------------------------------------------------ helpers --
 
@@ -60,9 +75,8 @@ function isDashboardCacheValid() {
 
 /**
  * Returns all readable dashboard configs.
- * The first call fetches everything via WebSocket; subsequent calls within
- * CACHE_TTL_MS return the cached result instantly. Concurrent callers all
- * await the same single in-flight promise.
+ * Concurrent callers all await the same in-flight promise.
+ * Results are cached for CACHE_TTL_MS.
  */
 async function getDashboardConfigs(hass) {
   if (isDashboardCacheValid()) return _dashboardConfigs;
@@ -96,12 +110,25 @@ async function getDashboardConfigs(hass) {
   return _dashboardPending;
 }
 
-/** Bust all caches - called on retry so fresh data is fetched. */
-function bustCache(resultCacheKey) {
+/**
+ * Pre-warm dashboard configs as soon as we have a hass instance.
+ * Called the first time any card receives hass, before it even starts loading.
+ */
+let _prewarmed = false;
+function prewarmIfNeeded(hass) {
+  if (_prewarmed || isDashboardCacheValid()) return;
+  _prewarmed = true;
+  getDashboardConfigs(hass);
+}
+
+/** Bust all caches - used on retry */
+function bustCache(elementCacheKey, resultCacheKey) {
   _dashboardConfigs = null;
   _dashboardCacheTs = 0;
   _dashboardPending = null;
-  if (resultCacheKey) _resultCache.delete(resultCacheKey);
+  _prewarmed        = false;
+  if (resultCacheKey)  _resultCache.delete(resultCacheKey);
+  if (elementCacheKey) _elementCache.delete(elementCacheKey);
 }
 
 // --------------------------------------------------------- card search ------
@@ -131,18 +158,17 @@ function searchCardInDashboard(config, cardId) {
 
 async function findCardConfigById(hass, cardId) {
   const cacheKey = `card::${cardId}`;
-  const cached = _resultCache.get(cacheKey);
-  if (cached) return cached.value;
+  if (_resultCache.has(cacheKey)) return _resultCache.get(cacheKey);
 
   const configs = await getDashboardConfigs(hass);
   for (const config of configs) {
     const found = searchCardInDashboard(config, cardId);
     if (found) {
-      _resultCache.set(cacheKey, { value: found });
+      _resultCache.set(cacheKey, found);
       return found;
     }
   }
-  _resultCache.set(cacheKey, { value: null });
+  _resultCache.set(cacheKey, null);
   return null;
 }
 
@@ -159,18 +185,17 @@ function searchSectionInDashboard(config, sectionId) {
 
 async function findSectionConfigById(hass, sectionId) {
   const cacheKey = `section::${sectionId}`;
-  const cached = _resultCache.get(cacheKey);
-  if (cached) return cached.value;
+  if (_resultCache.has(cacheKey)) return _resultCache.get(cacheKey);
 
   const configs = await getDashboardConfigs(hass);
   for (const config of configs) {
     const found = searchSectionInDashboard(config, sectionId);
     if (found) {
-      _resultCache.set(cacheKey, { value: found });
+      _resultCache.set(cacheKey, found);
       return found;
     }
   }
-  _resultCache.set(cacheKey, { value: null });
+  _resultCache.set(cacheKey, null);
   return null;
 }
 
@@ -179,13 +204,16 @@ async function findSectionConfigById(hass, sectionId) {
 class LinkedBase extends HTMLElement {
   constructor() {
     super();
-    this._config = null;
-    this._hass   = null;
-    this._state  = 'idle'; // idle | loading | ready | error
+    this._config    = null;
+    this._hass      = null;
+    this._state     = 'idle'; // idle | loading | ready | error
+    this._cacheKey  = null;   // element cache key for this instance
   }
 
   set hass(hass) {
     this._hass = hass;
+    // Pre-warm dashboard configs immediately on first hass
+    prewarmIfNeeded(hass);
     this._onHassUpdated(hass);
     if (this._state === 'idle') this._load();
   }
@@ -193,12 +221,26 @@ class LinkedBase extends HTMLElement {
   _onHassUpdated(_hass) {}
 
   _resetForNewId() {
-    this._state = 'idle';
+    this._cacheKey = null;
+    this._state    = 'idle';
     if (this._hass) this._load();
   }
 
   async _load() {
     if (!this._hass || !this._config) return;
+
+    // If we already have a built element for this id, reattach it instantly
+    if (this._cacheKey && _elementCache.has(this._cacheKey)) {
+      const cached = _elementCache.get(this._cacheKey);
+      this._onElementReused(cached);
+      this._state    = 'ready';
+      this.innerHTML = '';
+      this.appendChild(cached.element);
+      // Still propagate current hass state
+      this._onHassUpdated(this._hass);
+      return;
+    }
+
     this._state = 'loading';
     this._renderLoading();
     try {
@@ -208,6 +250,9 @@ class LinkedBase extends HTMLElement {
       this._state = 'error';
     }
   }
+
+  // Called when an element is pulled from cache on reattach
+  _onElementReused(_cached) {}
 
   async _doLoad() {}
 
@@ -223,7 +268,7 @@ class LinkedBase extends HTMLElement {
     `;
   }
 
-  _renderError(message, cacheKey) {
+  _renderError(message, elementCacheKey, resultCacheKey) {
     this.innerHTML = `
       <ha-card>
         <div class="lc-error">
@@ -238,8 +283,9 @@ class LinkedBase extends HTMLElement {
       ${sharedStyles()}
     `;
     this.querySelector('.lc-retry')?.addEventListener('click', () => {
-      bustCache(cacheKey);
-      this._state = 'idle';
+      bustCache(elementCacheKey, resultCacheKey);
+      this._cacheKey = null;
+      this._state    = 'idle';
       this._load();
     });
   }
@@ -279,7 +325,7 @@ function capitalize(s) {
 class LinkedCard extends LinkedBase {
   constructor() {
     super();
-    this._kind     = 'card';
+    this._kind      = 'card';
     this._childCard = null;
   }
 
@@ -297,43 +343,52 @@ class LinkedCard extends LinkedBase {
     if (this._childCard) this._childCard.hass = hass;
   }
 
+  _onElementReused(cached) {
+    this._childCard = cached.childCard;
+  }
+
   async _doLoad() {
-    const id = this._config.linked_card_id;
+    const id          = this._config.linked_card_id;
+    const elementKey  = `card::${id}`;
     const sourceConfig = await findCardConfigById(this._hass, id);
 
     if (!sourceConfig) {
       this._renderError(
         `No card found with card_id: "${id}". ` +
         `Make sure the source card has card_id set and is on a UI-managed dashboard.`,
-        `card::${id}`
+        elementKey, `card::${id}`
       );
       this._state = 'error';
       return;
     }
 
     if (sourceConfig.type === 'custom:linked-card') {
-      this._renderError(`Circular reference: card_id "${id}" points to another linked-card.`, `card::${id}`);
+      this._renderError(
+        `Circular reference: card_id "${id}" points to another linked-card.`,
+        elementKey, `card::${id}`
+      );
       this._state = 'error';
       return;
     }
 
-    const helpers = await window.loadCardHelpers();
+    const helpers = await getHelpers();
     const card    = helpers.createCardElement(sourceConfig);
     card.hass     = this._hass;
 
+    // Store in element cache so next view switch is instant
+    this._cacheKey  = elementKey;
     this._childCard = card;
-    this._state     = 'ready';
-    this.innerHTML  = '';
+    _elementCache.set(elementKey, { element: card, childCard: card });
+
+    this._state    = 'ready';
+    this.innerHTML = '';
     this.appendChild(card);
   }
 
   getCardSize() { return this._childCard?.getCardSize?.() ?? 1; }
 
   static getConfigElement() { return document.createElement('linked-card-editor'); }
-
-  static getStubConfig(hass, entities, entitiesFallback) {
-    return { linked_card_id: '' };
-  }
+  static getStubConfig()    { return { linked_card_id: '' }; }
 }
 
 // ---------------------------------------------------------- LinkedSection ---
@@ -359,15 +414,20 @@ class LinkedSection extends LinkedBase {
     for (const card of this._childCards) card.hass = hass;
   }
 
+  _onElementReused(cached) {
+    this._childCards = cached.childCards;
+  }
+
   async _doLoad() {
-    const id      = this._config.linked_section_id;
-    const section = await findSectionConfigById(this._hass, id);
+    const id         = this._config.linked_section_id;
+    const elementKey = `section::${id}`;
+    const section    = await findSectionConfigById(this._hass, id);
 
     if (!section) {
       this._renderError(
         `No section found with section_id: "${id}". ` +
         `Make sure the source section has section_id set and is on a UI-managed dashboard.`,
-        `section::${id}`
+        elementKey, `section::${id}`
       );
       this._state = 'error';
       return;
@@ -375,18 +435,18 @@ class LinkedSection extends LinkedBase {
 
     const cards = section.cards ?? [];
     if (cards.length === 0) {
-      this._renderError(`Section "${id}" exists but has no cards.`, `section::${id}`);
+      this._renderError(`Section "${id}" exists but has no cards.`, elementKey, `section::${id}`);
       this._state = 'error';
       return;
     }
 
-    const helpers = await window.loadCardHelpers();
-    const wrapper = document.createElement('div');
+    const helpers = await getHelpers();
+    const wrapper  = document.createElement('div');
     wrapper.className = 'linked-section-wrapper';
 
     if (section.title) {
-      const heading     = document.createElement('div');
-      heading.className = 'linked-section-title';
+      const heading       = document.createElement('div');
+      heading.className   = 'linked-section-title';
       heading.textContent = section.title;
       wrapper.appendChild(heading);
     }
@@ -398,6 +458,10 @@ class LinkedSection extends LinkedBase {
       this._childCards.push(card);
       wrapper.appendChild(card);
     }
+
+    // Store wrapper in element cache
+    this._cacheKey = elementKey;
+    _elementCache.set(elementKey, { element: wrapper, childCards: this._childCards });
 
     this._state    = 'ready';
     this.innerHTML = `
@@ -421,10 +485,7 @@ class LinkedSection extends LinkedBase {
   }
 
   static getConfigElement() { return document.createElement('linked-section-editor'); }
-
-  static getStubConfig() {
-    return { linked_section_id: '' };
-  }
+  static getStubConfig()    { return { linked_section_id: '' }; }
 }
 
 // --------------------------------------------------------- shared editor ----
@@ -453,7 +514,6 @@ function buildEditor(elementName, idField, label, hint, collectFn) {
       if (!this._hass || this._loading) return;
       this._loading = true;
       const ids     = [];
-      // Reuse the global dashboard cache - no extra fetches if already loaded
       const configs = await getDashboardConfigs(this._hass);
       for (const config of configs) collectFn(config, ids);
       this._ids     = [...new Set(ids)].sort();
