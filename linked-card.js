@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.5.6';
+const PLUGIN_VERSION = '2.5.7';
 
 // ----------------------------------------------------------------- version check --
 // Compares the running version against the last seen version in localStorage.
@@ -906,13 +906,23 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
               return;
             }
 
-            // Enter edit mode
-            console.log('[linked-cards] Firing ll-edit-mode-changed on hui-root');
+            // Enter edit mode - try multiple approaches
+            console.log('[linked-cards] Attempting to enter edit mode...');
+
+            // Approach 1: fire event on hui-root
             huiRoot.dispatchEvent(new CustomEvent('ll-edit-mode-changed', {
-              detail: { value: true },
-              bubbles: true,
-              composed: true,
+              detail: { value: true }, bubbles: true, composed: true,
             }));
+
+            // Approach 2: call setEditMode directly on the lovelace object
+            const lovelace = haPanel?._lovelace ?? huiRoot?._lovelace;
+            console.log('[linked-cards] lovelace object found:', !!lovelace, 'setEditMode:', typeof lovelace?.setEditMode);
+            if (typeof lovelace?.setEditMode === 'function') {
+              lovelace.setEditMode(true);
+            } else if (lovelace?.editMode === false || lovelace?.editMode === true) {
+              console.log('[linked-cards] Setting lovelace.editMode directly');
+              lovelace.editMode = true;
+            }
 
             // Find card index
             const views     = dashConfig.views ?? [];
@@ -942,23 +952,26 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
 
             setTimeout(() => {
               try {
-                // Try to find hui-view - it is the correct target for ll-edit-card.
-                // The path within the view should not include the view index.
                 const huiView = huiRoot.shadowRoot?.querySelector('hui-sections-view')
                   || huiRoot.shadowRoot?.querySelector('hui-view')
                   || huiRoot.shadowRoot?.querySelector('hui-masonry-view');
 
-                console.log('[linked-cards] hui-view element:', huiView ? huiView.tagName : 'NOT FOUND - falling back to hui-root');
+                console.log('[linked-cards] hui-view element:', huiView ? huiView.tagName : 'NOT FOUND');
+                console.log('[linked-cards] hui-view _lovelace:', !!(huiView?._lovelace));
 
-                const target          = huiView ?? huiRoot;
-                const pathWithinView  = path.slice(1); // strip view index
+                const target         = huiView ?? huiRoot;
+                const pathWithinView = path.slice(1);
                 console.log('[linked-cards] Firing ll-edit-card on', target.tagName, 'with path:', pathWithinView);
 
                 target.dispatchEvent(new CustomEvent('ll-edit-card', {
-                  detail: { path: pathWithinView },
-                  bubbles: true,
-                  composed: true,
+                  detail: { path: pathWithinView }, bubbles: true, composed: true,
                 }));
+
+                // Also try on hui-view's lovelace object if available
+                if (huiView?._lovelace?.setEditMode) {
+                  console.log('[linked-cards] Calling setEditMode on huiView._lovelace');
+                  huiView._lovelace.setEditMode(true);
+                }
               } catch (e) {
                 console.error('[linked-cards] Error firing ll-edit-card:', e);
               }
