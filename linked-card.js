@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.5.7';
+const PLUGIN_VERSION = '2.5.8';
 
 // ----------------------------------------------------------------- version check --
 // Compares the running version against the last seen version in localStorage.
@@ -906,22 +906,26 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
               return;
             }
 
-            // Enter edit mode - try multiple approaches
+            // Enter edit mode
+            // HA's lovelace property is on huiRoot.lovelace (no underscore).
+            // Edit mode is set by replacing the lovelace object with editMode: true.
             console.log('[linked-cards] Attempting to enter edit mode...');
 
-            // Approach 1: fire event on hui-root
-            huiRoot.dispatchEvent(new CustomEvent('ll-edit-mode-changed', {
-              detail: { value: true }, bubbles: true, composed: true,
-            }));
+            const lovelace = huiRoot.lovelace ?? haPanel?.lovelace;
+            console.log('[linked-cards] lovelace found:', !!lovelace, 'keys:', lovelace ? Object.keys(lovelace).join(', ') : 'none');
 
-            // Approach 2: call setEditMode directly on the lovelace object
-            const lovelace = haPanel?._lovelace ?? huiRoot?._lovelace;
-            console.log('[linked-cards] lovelace object found:', !!lovelace, 'setEditMode:', typeof lovelace?.setEditMode);
-            if (typeof lovelace?.setEditMode === 'function') {
-              lovelace.setEditMode(true);
-            } else if (lovelace?.editMode === false || lovelace?.editMode === true) {
-              console.log('[linked-cards] Setting lovelace.editMode directly');
-              lovelace.editMode = true;
+            if (lovelace) {
+              if (typeof lovelace.setEditMode === 'function') {
+                console.log('[linked-cards] Calling lovelace.setEditMode(true)');
+                lovelace.setEditMode(true);
+              } else {
+                // Set editMode directly on the lovelace object and reassign
+                console.log('[linked-cards] Setting lovelace.editMode = true directly');
+                lovelace.editMode = true;
+                if (huiRoot.lovelace) huiRoot.lovelace = { ...lovelace, editMode: true };
+              }
+            } else {
+              console.warn('[linked-cards] No lovelace object found on hui-root or ha-panel-lovelace');
             }
 
             // Find card index
@@ -968,9 +972,10 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
                 }));
 
                 // Also try on hui-view's lovelace object if available
-                if (huiView?._lovelace?.setEditMode) {
-                  console.log('[linked-cards] Calling setEditMode on huiView._lovelace');
-                  huiView._lovelace.setEditMode(true);
+                const viewLovelace = huiView?.lovelace;
+                if (viewLovelace?.setEditMode) {
+                  console.log('[linked-cards] Calling setEditMode on huiView.lovelace');
+                  viewLovelace.setEditMode(true);
                 }
               } catch (e) {
                 console.error('[linked-cards] Error firing ll-edit-card:', e);
