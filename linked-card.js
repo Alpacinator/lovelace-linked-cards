@@ -18,16 +18,12 @@
  *
  *   custom:linked-section
  *     Renders all cards from a source section identified by section_id.
- *     Useful in the "sections" view layout.
  *
  *     Source (add section_id to any section in a sections-layout view):
  *       section_id: bedroom-controls
  *       cards:
  *         - type: light
  *           entity: light.bedroom
- *         - type: entities
- *           entities:
- *             - sensor.bedroom_temperature
  *
  *     Linked copy (place as a card anywhere):
  *       type: custom:linked-section
@@ -35,12 +31,20 @@
  */
 
 const CACHE_TTL_MS = 30_000;
-const PLUGIN_VERSION = '1.0.0';
+const PLUGIN_VERSION = '1.2.0';
 
-// Shared cache for both card and section lookups
+// ------------------------------------------------------------------ global cache --
+// All linked-card and linked-section instances on the page share a single fetch
+// for dashboard configs. No matter how many cards are on the page, only one set
+// of WebSocket calls is made per TTL window.
+
+let _dashboardConfigs = null;      // cached array of all dashboard configs
+let _dashboardCacheTs  = 0;        // timestamp of last successful fetch
+let _dashboardPending  = null;     // in-flight promise, shared across all instances
+
+// Per-id result cache so we don't re-search all configs for the same id every time.
 // key: `card::<id>` or `section::<id>`
-const _cache = new Map();
-const _pending = new Map();
+const _resultCache = new Map();
 
 // ------------------------------------------------------------------ helpers --
 
@@ -50,29 +54,54 @@ function cloneWithout(obj, ...keys) {
   return copy;
 }
 
-function isCacheValid(entry) {
-  return entry && Date.now() - entry.ts < CACHE_TTL_MS;
+function isDashboardCacheValid() {
+  return _dashboardConfigs !== null && Date.now() - _dashboardCacheTs < CACHE_TTL_MS;
 }
 
+/**
+ * Returns all readable dashboard configs.
+ * The first call fetches everything via WebSocket; subsequent calls within
+ * CACHE_TTL_MS return the cached result instantly. Concurrent callers all
+ * await the same single in-flight promise.
+ */
 async function getDashboardConfigs(hass) {
-  let paths;
-  try {
-    const dashboards = await hass.callWS({ type: 'lovelace/dashboards/list' });
-    paths = [null, ...dashboards.map((d) => d.url_path)];
-  } catch {
-    paths = [null];
-  }
+  if (isDashboardCacheValid()) return _dashboardConfigs;
+  if (_dashboardPending) return _dashboardPending;
 
-  const configs = [];
-  for (const urlPath of paths) {
+  _dashboardPending = (async () => {
+    let paths;
     try {
-      const config = await hass.callWS({ type: 'lovelace/config', url_path: urlPath });
-      configs.push(config);
+      const dashboards = await hass.callWS({ type: 'lovelace/dashboards/list' });
+      paths = [null, ...dashboards.map((d) => d.url_path)];
     } catch {
-      // YAML-managed or inaccessible - skip
+      paths = [null];
     }
-  }
-  return configs;
+
+    const configs = [];
+    for (const urlPath of paths) {
+      try {
+        const config = await hass.callWS({ type: 'lovelace/config', url_path: urlPath });
+        configs.push(config);
+      } catch {
+        // YAML-managed or inaccessible - skip
+      }
+    }
+
+    _dashboardConfigs = configs;
+    _dashboardCacheTs = Date.now();
+    _dashboardPending = null;
+    return configs;
+  })();
+
+  return _dashboardPending;
+}
+
+/** Bust all caches - called on retry so fresh data is fetched. */
+function bustCache(resultCacheKey) {
+  _dashboardConfigs = null;
+  _dashboardCacheTs = 0;
+  _dashboardPending = null;
+  if (resultCacheKey) _resultCache.delete(resultCacheKey);
 }
 
 // --------------------------------------------------------- card search ------
@@ -102,29 +131,19 @@ function searchCardInDashboard(config, cardId) {
 
 async function findCardConfigById(hass, cardId) {
   const cacheKey = `card::${cardId}`;
-  const cached = _cache.get(cacheKey);
-  if (isCacheValid(cached)) return cached.value;
-  if (_pending.has(cacheKey)) return _pending.get(cacheKey);
+  const cached = _resultCache.get(cacheKey);
+  if (cached) return cached.value;
 
-  const promise = (async () => {
-    const configs = await getDashboardConfigs(hass);
-    for (const config of configs) {
-      const found = searchCardInDashboard(config, cardId);
-      if (found) {
-        _cache.set(cacheKey, { value: found, ts: Date.now() });
-        return found;
-      }
+  const configs = await getDashboardConfigs(hass);
+  for (const config of configs) {
+    const found = searchCardInDashboard(config, cardId);
+    if (found) {
+      _resultCache.set(cacheKey, { value: found });
+      return found;
     }
-    _cache.set(cacheKey, { value: null, ts: Date.now() });
-    return null;
-  })();
-
-  _pending.set(cacheKey, promise);
-  try {
-    return await promise;
-  } finally {
-    _pending.delete(cacheKey);
   }
+  _resultCache.set(cacheKey, { value: null });
+  return null;
 }
 
 // --------------------------------------------------------- section search ---
@@ -140,40 +159,29 @@ function searchSectionInDashboard(config, sectionId) {
 
 async function findSectionConfigById(hass, sectionId) {
   const cacheKey = `section::${sectionId}`;
-  const cached = _cache.get(cacheKey);
-  if (isCacheValid(cached)) return cached.value;
-  if (_pending.has(cacheKey)) return _pending.get(cacheKey);
+  const cached = _resultCache.get(cacheKey);
+  if (cached) return cached.value;
 
-  const promise = (async () => {
-    const configs = await getDashboardConfigs(hass);
-    for (const config of configs) {
-      const found = searchSectionInDashboard(config, sectionId);
-      if (found) {
-        _cache.set(cacheKey, { value: found, ts: Date.now() });
-        return found;
-      }
+  const configs = await getDashboardConfigs(hass);
+  for (const config of configs) {
+    const found = searchSectionInDashboard(config, sectionId);
+    if (found) {
+      _resultCache.set(cacheKey, { value: found });
+      return found;
     }
-    _cache.set(cacheKey, { value: null, ts: Date.now() });
-    return null;
-  })();
-
-  _pending.set(cacheKey, promise);
-  try {
-    return await promise;
-  } finally {
-    _pending.delete(cacheKey);
   }
+  _resultCache.set(cacheKey, { value: null });
+  return null;
 }
 
 // ---------------------------------------------------- shared base class -----
-// Both LinkedCard and LinkedSection share loading/error/retry UI logic.
 
 class LinkedBase extends HTMLElement {
   constructor() {
     super();
     this._config = null;
-    this._hass = null;
-    this._state = 'idle'; // idle | loading | ready | error
+    this._hass   = null;
+    this._state  = 'idle'; // idle | loading | ready | error
   }
 
   set hass(hass) {
@@ -182,7 +190,6 @@ class LinkedBase extends HTMLElement {
     if (this._state === 'idle') this._load();
   }
 
-  // Subclasses override to propagate hass to child elements after load
   _onHassUpdated(_hass) {}
 
   _resetForNewId() {
@@ -202,7 +209,6 @@ class LinkedBase extends HTMLElement {
     }
   }
 
-  // Subclasses implement the actual fetch + render logic
   async _doLoad() {}
 
   _renderLoading() {
@@ -232,15 +238,13 @@ class LinkedBase extends HTMLElement {
       ${sharedStyles()}
     `;
     this.querySelector('.lc-retry')?.addEventListener('click', () => {
-      if (cacheKey) _cache.delete(cacheKey);
+      bustCache(cacheKey);
       this._state = 'idle';
       this._load();
     });
   }
 
-  getCardSize() {
-    return 1;
-  }
+  getCardSize() { return 1; }
 }
 
 function sharedStyles() {
@@ -275,7 +279,7 @@ function capitalize(s) {
 class LinkedCard extends LinkedBase {
   constructor() {
     super();
-    this._kind = 'card';
+    this._kind     = 'card';
     this._childCard = null;
   }
 
@@ -308,33 +312,26 @@ class LinkedCard extends LinkedBase {
     }
 
     if (sourceConfig.type === 'custom:linked-card') {
-      this._renderError(
-        `Circular reference: card_id "${id}" points to another linked-card.`,
-        `card::${id}`
-      );
+      this._renderError(`Circular reference: card_id "${id}" points to another linked-card.`, `card::${id}`);
       this._state = 'error';
       return;
     }
 
     const helpers = await window.loadCardHelpers();
-    const card = helpers.createCardElement(sourceConfig);
-    card.hass = this._hass;
+    const card    = helpers.createCardElement(sourceConfig);
+    card.hass     = this._hass;
 
     this._childCard = card;
-    this._state = 'ready';
-    this.innerHTML = '';
+    this._state     = 'ready';
+    this.innerHTML  = '';
     this.appendChild(card);
   }
 
-  getCardSize() {
-    return this._childCard?.getCardSize?.() ?? 1;
-  }
+  getCardSize() { return this._childCard?.getCardSize?.() ?? 1; }
 
-  static getConfigElement() {
-    return document.createElement('linked-card-editor');
-  }
+  static getConfigElement() { return document.createElement('linked-card-editor'); }
 
-  static getStubConfig() {
+  static getStubConfig(hass, entities, entitiesFallback) {
     return { linked_card_id: '' };
   }
 }
@@ -344,7 +341,7 @@ class LinkedCard extends LinkedBase {
 class LinkedSection extends LinkedBase {
   constructor() {
     super();
-    this._kind = 'section';
+    this._kind       = 'section';
     this._childCards = [];
   }
 
@@ -363,7 +360,7 @@ class LinkedSection extends LinkedBase {
   }
 
   async _doLoad() {
-    const id = this._config.linked_section_id;
+    const id      = this._config.linked_section_id;
     const section = await findSectionConfigById(this._hass, id);
 
     if (!section) {
@@ -378,10 +375,7 @@ class LinkedSection extends LinkedBase {
 
     const cards = section.cards ?? [];
     if (cards.length === 0) {
-      this._renderError(
-        `Section "${id}" exists but has no cards.`,
-        `section::${id}`
-      );
+      this._renderError(`Section "${id}" exists but has no cards.`, `section::${id}`);
       this._state = 'error';
       return;
     }
@@ -390,9 +384,8 @@ class LinkedSection extends LinkedBase {
     const wrapper = document.createElement('div');
     wrapper.className = 'linked-section-wrapper';
 
-    // Optional title from the section config
     if (section.title) {
-      const heading = document.createElement('div');
+      const heading     = document.createElement('div');
       heading.className = 'linked-section-title';
       heading.textContent = section.title;
       wrapper.appendChild(heading);
@@ -401,24 +394,21 @@ class LinkedSection extends LinkedBase {
     this._childCards = [];
     for (const cardConfig of cards) {
       const card = helpers.createCardElement(cardConfig);
-      card.hass = this._hass;
+      card.hass  = this._hass;
       this._childCards.push(card);
       wrapper.appendChild(card);
     }
 
-    this._state = 'ready';
+    this._state    = 'ready';
     this.innerHTML = `
       <style>
         .linked-section-wrapper {
-          display: flex;
-          flex-direction: column;
+          display: flex; flex-direction: column;
           gap: var(--ha-card-border-radius, 8px);
         }
         .linked-section-title {
-          font-size: 14px;
-          font-weight: 500;
-          color: var(--secondary-text-color);
-          padding: 4px 0;
+          font-size: 14px; font-weight: 500;
+          color: var(--secondary-text-color); padding: 4px 0;
         }
       </style>
     `;
@@ -426,13 +416,11 @@ class LinkedSection extends LinkedBase {
   }
 
   getCardSize() {
-    if (this._childCards.length === 0) return 1;
+    if (!this._childCards.length) return 1;
     return this._childCards.reduce((sum, c) => sum + (c.getCardSize?.() ?? 1), 0);
   }
 
-  static getConfigElement() {
-    return document.createElement('linked-section-editor');
-  }
+  static getConfigElement() { return document.createElement('linked-section-editor'); }
 
   static getStubConfig() {
     return { linked_section_id: '' };
@@ -440,15 +428,15 @@ class LinkedSection extends LinkedBase {
 }
 
 // --------------------------------------------------------- shared editor ----
-// Both editors are identical in structure; parameterised by type.
 
 function buildEditor(elementName, idField, label, hint, collectFn) {
   class Editor extends HTMLElement {
     constructor() {
       super();
-      this._config = {};
-      this._hass = null;
-      this._ids = [];
+      this._config  = {};
+      this._hass    = null;
+      this._ids     = [];
+      this._loading = false;
     }
 
     setConfig(config) {
@@ -462,21 +450,26 @@ function buildEditor(elementName, idField, label, hint, collectFn) {
     }
 
     async _loadIds() {
-      if (!this._hass) return;
-      const ids = [];
+      if (!this._hass || this._loading) return;
+      this._loading = true;
+      const ids     = [];
+      // Reuse the global dashboard cache - no extra fetches if already loaded
       const configs = await getDashboardConfigs(this._hass);
       for (const config of configs) collectFn(config, ids);
-      this._ids = [...new Set(ids)].sort();
+      this._ids     = [...new Set(ids)].sort();
+      this._loading = false;
       this._render();
     }
 
     _render() {
       const currentId = this._config[idField] ?? '';
-      const options = this._ids.length
+      const hasIds    = this._ids.length > 0;
+
+      const options = hasIds
         ? this._ids.map((id) =>
             `<option value="${id}" ${id === currentId ? 'selected' : ''}>${id}</option>`
           ).join('')
-        : `<option value="" disabled>None found on any UI-managed dashboard</option>`;
+        : `<option value="" disabled>${this._loading ? 'Loading...' : 'None found on any UI-managed dashboard'}</option>`;
 
       this.innerHTML = `
         <div class="lc-editor">
@@ -484,30 +477,48 @@ function buildEditor(elementName, idField, label, hint, collectFn) {
           <label class="lc-label">
             ${label}
             <div class="lc-row">
-              <input type="text" class="lc-input" placeholder="e.g. my-${idField.replace('linked_', '').replace('_id', '')}" value="${currentId}" />
-              <select class="lc-select">
+              <input
+                type="text"
+                class="lc-input"
+                placeholder="e.g. my-${idField.replace('linked_', '').replace('_id', '')}"
+                value="${currentId}"
+              />
+              <select class="lc-select" ${!hasIds ? 'disabled' : ''}>
                 <option value="">-- pick existing --</option>
                 ${options}
               </select>
             </div>
           </label>
+          ${currentId && !hasIds ? `<p class="lc-warn">Could not load dashboard configs. Check that your dashboards are UI-managed.</p>` : ''}
         </div>
         <style>
           .lc-editor { padding: 8px 0; font-size: 14px; }
           .lc-hint { color: var(--secondary-text-color); margin: 0 0 12px; font-size: 12px; line-height: 1.5; }
           .lc-hint code { background: var(--code-editor-background-color, #f5f5f5); padding: 1px 4px; border-radius: 3px; }
+          .lc-warn { color: var(--warning-color, #ff9800); font-size: 12px; margin: 8px 0 0; }
           .lc-label { display: flex; flex-direction: column; gap: 6px; font-weight: 500; }
           .lc-row { display: flex; gap: 8px; margin-top: 4px; }
-          .lc-input { flex: 1; padding: 8px; border: 1px solid var(--divider-color); border-radius: 4px; background: var(--card-background-color); color: var(--primary-text-color); font-size: 14px; }
-          .lc-select { padding: 8px; border: 1px solid var(--divider-color); border-radius: 4px; background: var(--card-background-color); color: var(--primary-text-color); font-size: 14px; }
+          .lc-input {
+            flex: 1; padding: 8px;
+            border: 1px solid var(--divider-color); border-radius: 4px;
+            background: var(--card-background-color); color: var(--primary-text-color);
+            font-size: 14px;
+          }
+          .lc-select {
+            padding: 8px;
+            border: 1px solid var(--divider-color); border-radius: 4px;
+            background: var(--card-background-color); color: var(--primary-text-color);
+            font-size: 14px;
+          }
+          .lc-select:disabled { opacity: 0.5; }
         </style>
       `;
 
-      const input = this.querySelector('.lc-input');
+      const input  = this.querySelector('.lc-input');
       const select = this.querySelector('.lc-select');
 
       input.addEventListener('change', (e) => this._fire(e.target.value.trim()));
-      select.addEventListener('change', (e) => {
+      select?.addEventListener('change', (e) => {
         if (e.target.value) { input.value = e.target.value; this._fire(e.target.value); }
       });
     }
@@ -524,7 +535,6 @@ function buildEditor(elementName, idField, label, hint, collectFn) {
   customElements.define(elementName, Editor);
 }
 
-// Collect card_id values from a dashboard config
 function collectCardIds(config, ids) {
   function walk(cards) {
     for (const card of cards ?? []) {
@@ -539,7 +549,6 @@ function collectCardIds(config, ids) {
   }
 }
 
-// Collect section_id values from a dashboard config
 function collectSectionIds(config, ids) {
   for (const view of config?.views ?? []) {
     for (const section of view.sections ?? []) {
@@ -566,7 +575,7 @@ buildEditor(
 
 // ---------------------------------------------------------------- register --
 
-customElements.define('linked-card', LinkedCard);
+customElements.define('linked-card',    LinkedCard);
 customElements.define('linked-section', LinkedSection);
 
 window.customCards = window.customCards || [];
@@ -588,7 +597,7 @@ window.customCards.push(
 );
 
 console.info(
-  `%c LINKED-CARD %c v${PLUGIN_VERSION} `,
+  `%c LINKED-CARDS %c v${PLUGIN_VERSION} `,
   'background:#2196f3;color:#fff;font-weight:bold;padding:2px 4px;border-radius:3px 0 0 3px',
   'background:#1565c0;color:#fff;padding:2px 4px;border-radius:0 3px 3px 0'
 );
