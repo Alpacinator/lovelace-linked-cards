@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.5.4';
+const PLUGIN_VERSION = '2.0.0';
 
 // ----------------------------------------------------------------- version check --
 // Compares the running version against the last seen version in localStorage.
@@ -941,13 +941,28 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
             }
 
             setTimeout(() => {
-              console.log('[linked-cards] Firing ll-edit-card with path:', path);
-              huiRoot.dispatchEvent(new CustomEvent('ll-edit-card', {
-                detail: { path },
-                bubbles: true,
-                composed: true,
-              }));
-            }, 200);
+              try {
+                // Try to find hui-view - it is the correct target for ll-edit-card.
+                // The path within the view should not include the view index.
+                const huiView = huiRoot.shadowRoot?.querySelector('hui-sections-view')
+                  || huiRoot.shadowRoot?.querySelector('hui-view')
+                  || huiRoot.shadowRoot?.querySelector('hui-masonry-view');
+
+                console.log('[linked-cards] hui-view element:', huiView ? huiView.tagName : 'NOT FOUND - falling back to hui-root');
+
+                const target          = huiView ?? huiRoot;
+                const pathWithinView  = path.slice(1); // strip view index
+                console.log('[linked-cards] Firing ll-edit-card on', target.tagName, 'with path:', pathWithinView);
+
+                target.dispatchEvent(new CustomEvent('ll-edit-card', {
+                  detail: { path: pathWithinView },
+                  bubbles: true,
+                  composed: true,
+                }));
+              } catch (e) {
+                console.error('[linked-cards] Error firing ll-edit-card:', e);
+              }
+            }, 500);
 
           } catch (e) {
             console.error('[linked-cards] Error while trying to open card editor:', e);
