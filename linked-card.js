@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.5.3';
+const PLUGIN_VERSION = '2.5.4';
 
 // ----------------------------------------------------------------- version check --
 // Compares the running version against the last seen version in localStorage.
@@ -220,7 +220,7 @@ function _notifyReloadIfNeeded(hass) {
     localStorage.removeItem('linked-cards-needs-reload');
     hass.callService('persistent_notification', 'create', {
       title: 'Linked Cards updated',
-      message: `Linked Cards was updated to v${PLUGIN_VERSION}. Please reload the page to avoid issues with cached files.`,
+      message: `Linked Cards was updated to v${PLUGIN_VERSION}. Please do a hard refresh to avoid issues with cached files. Windows/Linux: Ctrl+Shift+R. Mac: Cmd+Shift+R.`,
       notification_id: 'linked_cards_update',
     });
   } catch (_) {}
@@ -780,7 +780,7 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
               <button class="lc-retry-btn">Retry</button>
             </div>
           ` : ''}
-          <button class="lc-reload-btn" id="lc-hard-reload">Force reload page</button>
+
         </div>
         <style>
           .lc-editor { display: flex; flex-direction: column; gap: 12px; padding: 8px 0; font-size: 14px; }
@@ -811,12 +811,7 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
             padding: 6px 12px; font-size: 13px; cursor: pointer; width: 100%;
           }
           .lc-goto-btn:hover { background: var(--primary-color, #2196f3); color: #fff; }
-          .lc-reload-btn {
-            background: none; border: 1px solid var(--divider-color);
-            color: var(--secondary-text-color); border-radius: 4px;
-            padding: 6px 12px; font-size: 12px; cursor: pointer; width: 100%;
-          }
-          .lc-reload-btn:hover { border-color: var(--primary-color); color: var(--primary-color); }
+
         </style>
       `;
 
@@ -846,12 +841,7 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
         this._loadDashboards();
       });
 
-      this.querySelector('#lc-hard-reload')?.addEventListener('click', () => {
-        // Force a hard reload by appending a cache-busting query parameter
-        const url = new URL(window.location.href);
-        url.searchParams.set('_lc_reload', Date.now());
-        window.location.href = url.toString();
-      });
+
 
       this.querySelector('#lc-goto')?.addEventListener('click', async () => {
         const dashboard  = this._config.dashboard ?? null;
