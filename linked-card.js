@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.2.1';
+const PLUGIN_VERSION = '2.3.0';
 
 // ------------------------------------------------------------------ global cache --
 
@@ -122,8 +122,16 @@ function getCardLabel(card, index) {
 
 function getSectionLabel(section, index) {
   if (section.title) return section.title;
-  const cardCount = (section.cards ?? []).length;
-  return `Section ${index + 1} (untitled, ${cardCount} card${cardCount !== 1 ? 's' : ''})`;
+  const cards = section.cards ?? [];
+  const names = cards
+    .map((c) => c.name || c.title || c.heading || null)
+    .filter(Boolean)
+    .slice(0, 3);
+  if (names.length) {
+    const preview = names.join(', ');
+    return `Section ${index + 1}: ${preview}${cards.length > 3 ? ', ...' : ''}`;
+  }
+  return `Section ${index + 1} (${cards.length} card${cards.length !== 1 ? 's' : ''})`;
 }
 
 function findViewByIdInConfig(dashConfig, viewId) {
@@ -765,15 +773,38 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
       });
 
       this.querySelector('#lc-goto')?.addEventListener('click', async () => {
-        const dashboard = this._config.dashboard ?? null;
-        const viewId    = this._config.view ?? '';
+        const dashboard  = this._config.dashboard ?? null;
+        const viewId     = this._config.view ?? '';
         const dashConfig = await getDashboardConfig(this._hass, dashboard);
         const view       = findViewByIdInConfig(dashConfig, viewId);
-        if (view) {
-          const url = buildViewUrl(dashboard, view, dashConfig.views);
-          history.pushState(null, '', url);
-          window.dispatchEvent(new PopStateEvent('popstate'));
-        }
+        if (!view) return;
+
+        // Navigate to the source view
+        const url = buildViewUrl(dashboard, view, dashConfig.views);
+        history.pushState(null, '', url);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+
+        // After navigation settles, try to enter edit mode by finding
+        // HA's internal lovelace root and toggling edit mode on it.
+        // This is best-effort and may not work across all HA versions.
+        setTimeout(() => {
+          try {
+            const root = document
+              .querySelector('home-assistant')
+              ?.shadowRoot?.querySelector('home-assistant-main')
+              ?.shadowRoot?.querySelector('ha-panel-lovelace')
+              ?.shadowRoot?.querySelector('hui-root');
+            if (root) {
+              root.dispatchEvent(new CustomEvent('ll-edit-mode-changed', {
+                detail: { value: true },
+                bubbles: true,
+                composed: true,
+              }));
+            }
+          } catch (_) {
+            // Silently ignore if HA's internal structure has changed
+          }
+        }, 300);
       });
     }
 
