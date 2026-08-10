@@ -3,14 +3,21 @@
  *
  * Two card types:
  *
- *   custom:linked-card
- *     Renders a single source card identified by card_id.
+ *   custom:linked-card-source
+ *     Wraps any card and gives it a card_id so it can be linked from elsewhere.
+ *     Use this instead of adding card_id directly to a standard card, which
+ *     breaks the visual editor.
  *
- *     Source (add card_id to any existing card):
- *       type: entities
+ *     Source:
+ *       type: custom:linked-card-source
  *       card_id: my-sensor-list
- *       entities:
- *         - sensor.temperature
+ *       card:
+ *         type: entities
+ *         entities:
+ *           - sensor.temperature
+ *
+ *   custom:linked-card
+ *     Renders a source card identified by card_id.
  *
  *     Linked copy:
  *       type: custom:linked-card
@@ -31,7 +38,7 @@
  */
 
 const CACHE_TTL_MS    = 30_000;
-const PLUGIN_VERSION  = '1.3.0';
+const PLUGIN_VERSION  = '1.4.0';
 
 // ------------------------------------------------------------------ global cache --
 // All instances share one fetch. No matter how many cards are on a view,
@@ -135,6 +142,11 @@ function bustCache(elementCacheKey, resultCacheKey) {
 
 function searchCardsInList(cards, cardId) {
   for (const card of cards ?? []) {
+    // Match wrapper source cards (preferred - no visual editor warning)
+    if (card.type === 'custom:linked-card-source' && card.card_id === cardId && card.card) {
+      return card.card;
+    }
+    // Also match legacy card_id on standard cards for backwards compatibility
     if (card.card_id === cardId) return cloneWithout(card, 'card_id');
     const nested =
       searchCardsInList(card.cards, cardId) ||
@@ -600,7 +612,8 @@ function collectCardIds(config, ids) {
     for (const card of cards ?? []) {
       if (card.card_id) ids.push(card.card_id);
       walk(card.cards);
-      if (card.card) walk([card.card]);
+      // Don't recurse into linked-card-source's inner card to avoid double-counting
+      if (card.card && card.type !== 'custom:linked-card-source') walk([card.card]);
     }
   }
   for (const view of config?.views ?? []) {
@@ -621,7 +634,7 @@ buildEditor(
   'linked-card-editor',
   'linked_card_id',
   'Card ID',
-  'Add <code>card_id: your-unique-id</code> to any existing card to make it a source, then pick it here.',
+  'Wrap any card with <code>custom:linked-card-source</code> and give it a <code>card_id</code>, then pick it here.',
   collectCardIds
 );
 
@@ -633,6 +646,106 @@ buildEditor(
   collectSectionIds
 );
 
+
+// -------------------------------------------------------- LinkedCardSource ----
+// Wraps any card and exposes a card_id so linked-card can find it.
+// Renders identically to the inner card - invisible to the user.
+
+class LinkedCardSource extends HTMLElement {
+  constructor() {
+    super();
+    this._config    = null;
+    this._hass      = null;
+    this._childCard = null;
+  }
+
+  setConfig(config) {
+    if (!config.card_id) throw new Error('[linked-card-source] card_id is required.');
+    if (!config.card)    throw new Error('[linked-card-source] card is required.');
+    this._config = config;
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._childCard) this._childCard.hass = hass;
+  }
+
+  async _render() {
+    if (!this._config?.card) return;
+    const helpers   = await getHelpers();
+    const card      = helpers.createCardElement(this._config.card);
+    if (this._hass) card.hass = this._hass;
+    this._childCard = card;
+    this.innerHTML  = '';
+    this.appendChild(card);
+  }
+
+  getCardSize() { return this._childCard?.getCardSize?.() ?? 1; }
+
+  static getConfigElement() { return document.createElement('linked-card-source-editor'); }
+  static getStubConfig()    { return { card_id: '', card: { type: 'entities', entities: [] } }; }
+}
+
+class LinkedCardSourceEditor extends HTMLElement {
+  constructor() {
+    super();
+    this._config = {};
+    this._hass   = null;
+  }
+
+  setConfig(config) {
+    this._config = config;
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+  }
+
+  _render() {
+    const currentId = this._config.card_id || '';
+    this.innerHTML = `
+      <div class="lc-editor">
+        <p class="lc-hint">
+          Give this source card a unique ID. Then reference it from any dashboard using
+          <code>custom:linked-card</code> with <code>linked_card_id: ${currentId || 'your-id'}</code>.
+        </p>
+        <label class="lc-label">
+          Card ID
+          <input type="text" class="lc-input" placeholder="e.g. living-room-sensors" value="${currentId}" />
+        </label>
+        <p class="lc-hint" style="margin-top:12px">
+          The inner card is configured via the <code>card:</code> key in YAML.
+        </p>
+      </div>
+      <style>
+        .lc-editor { padding: 8px 0; font-size: 14px; }
+        .lc-hint { color: var(--secondary-text-color); margin: 0 0 6px; font-size: 12px; line-height: 1.5; }
+        .lc-hint code { background: var(--code-editor-background-color, #f5f5f5); padding: 1px 4px; border-radius: 3px; }
+        .lc-label { display: flex; flex-direction: column; gap: 6px; font-weight: 500; }
+        .lc-input {
+          padding: 8px; margin-top: 4px;
+          border: 1px solid var(--divider-color); border-radius: 4px;
+          background: var(--card-background-color); color: var(--primary-text-color);
+          font-size: 14px; width: 100%; box-sizing: border-box;
+        }
+      </style>
+    `;
+
+    this.querySelector('.lc-input').addEventListener('change', (e) => {
+      this.dispatchEvent(new CustomEvent('config-changed', {
+        detail: { config: { ...this._config, card_id: e.target.value.trim() } },
+        bubbles: true,
+        composed: true,
+      }));
+    });
+  }
+}
+
+customElements.define('linked-card-source',        LinkedCardSource);
+customElements.define('linked-card-source-editor', LinkedCardSourceEditor);
+
 // ---------------------------------------------------------------- register --
 
 customElements.define('linked-card',    LinkedCard);
@@ -640,6 +753,13 @@ customElements.define('linked-section', LinkedSection);
 
 window.customCards = window.customCards || [];
 window.customCards.push(
+  {
+    type: 'linked-card-source',
+    name: 'Linked Card Source',
+    description: 'Wraps a card and gives it a card_id so it can be mirrored anywhere using custom:linked-card.',
+    preview: false,
+    documentationURL: 'https://github.com/Alpacinator/lovelace-linked-cards',
+  },
   {
     type: 'linked-card',
     name: 'Linked Card',
