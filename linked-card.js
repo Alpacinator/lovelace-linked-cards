@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.2.0';
+const PLUGIN_VERSION = '2.2.1';
 
 // ------------------------------------------------------------------ global cache --
 
@@ -697,6 +697,7 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
             <select class="lc-select" id="lc-item" ${!this._items.length ? 'disabled' : ''}>${itemPlaceholder}${itemOptions}</select>
           </label>
           ${itemField === 'card' ? `<p class="lc-hint">Only cards with a name, title, or heading are listed. Add a <code>name</code> to any card to make it available here.</p>` : ''}
+          ${viewId && itemId ? `<button class="lc-goto-btn" id="lc-goto">Go to source view</button>` : ''}
           ${this._error ? `
             <div class="lc-error-box">
               <strong>Error loading dashboards</strong>
@@ -728,6 +729,12 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
             font-size: 12px; cursor: pointer;
           }
           .lc-retry-btn:hover { background: rgba(255,255,255,0.35); }
+          .lc-goto-btn {
+            background: none; border: 1px solid var(--primary-color, #2196f3);
+            color: var(--primary-color, #2196f3); border-radius: 4px;
+            padding: 6px 12px; font-size: 13px; cursor: pointer; width: 100%;
+          }
+          .lc-goto-btn:hover { background: var(--primary-color, #2196f3); color: #fff; }
         </style>
       `;
 
@@ -755,6 +762,18 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
         bustDashboardCache(dashboard);
         this._error = null;
         this._loadDashboards();
+      });
+
+      this.querySelector('#lc-goto')?.addEventListener('click', async () => {
+        const dashboard = this._config.dashboard ?? null;
+        const viewId    = this._config.view ?? '';
+        const dashConfig = await getDashboardConfig(this._hass, dashboard);
+        const view       = findViewByIdInConfig(dashConfig, viewId);
+        if (view) {
+          const url = buildViewUrl(dashboard, view, dashConfig.views);
+          history.pushState(null, '', url);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }
       });
     }
 
