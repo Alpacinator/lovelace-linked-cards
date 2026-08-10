@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.6.4';
+const PLUGIN_VERSION = '2.6.5';
 
 // ----------------------------------------------------------------- version check --
 // Compares the running version against the last seen version in localStorage.
@@ -1008,8 +1008,21 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
                     cardEl.dispatchEvent(new CustomEvent('ll-edit-card', {
                       detail: { path: pathWithinView }, bubbles: true, composed: true,
                     }));
-                    const editBtn = cardEl.shadowRoot?.querySelector('ha-icon-button');
-                    console.log('[linked-cards] Edit button:', editBtn ? 'found' : 'NOT FOUND');
+
+                    // Log what's in the card's shadow root and its parent
+                    const parent = cardEl.parentElement ?? cardEl.getRootNode()?.host;
+                    console.log('[linked-cards] hui-card parent tag:', parent?.tagName);
+                    console.log('[linked-cards] hui-card shadow children:', 
+                      [...(cardEl.shadowRoot?.children ?? [])].map(c => c.tagName).join(', '));
+                    console.log('[linked-cards] hui-card parent shadow children:', 
+                      [...(parent?.shadowRoot?.children ?? [])].map(c => c.tagName).join(', '));
+
+                    // Try edit button on card, parent, and parent's shadow
+                    const editBtn = 
+                      cardEl.shadowRoot?.querySelector('ha-icon-button') ??
+                      parent?.shadowRoot?.querySelector('ha-icon-button') ??
+                      parent?.querySelector('ha-icon-button');
+                    console.log('[linked-cards] Edit button found:', editBtn ? editBtn.outerHTML.slice(0, 100) : 'NOT FOUND');
                     editBtn?.click();
                   }
                 } catch (e) {
