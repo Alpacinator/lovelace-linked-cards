@@ -19,7 +19,7 @@
  */
 
 const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.5.0';
+const PLUGIN_VERSION = '2.5.1';
 
 // ----------------------------------------------------------------- version check --
 // Compares the running version against the last seen version in localStorage.
@@ -38,6 +38,15 @@ try {
   }
   localStorage.setItem(LC_VERSION_KEY, PLUGIN_VERSION);
 } catch (_) {}
+
+// ------------------------------------------------------------------ helpers --
+
+// Guard against passing a partially initialized hass object to child cards.
+// card-mod crashes if hass.auth is undefined, which can happen during HA startup
+// or view transitions. Only pass hass through if it looks complete.
+function isHassReady(hass) {
+  return hass && hass.auth && hass.states && hass.callWS;
+}
 
 // ------------------------------------------------------------------ global cache --
 
@@ -322,8 +331,10 @@ class LinkedBase extends HTMLElement {
     if (this._sourceUrl) {
       overlay.querySelector('.lc-edit-btn').addEventListener('click', (e) => {
         e.stopPropagation();
-        history.pushState(null, '', this._sourceUrl);
-        window.dispatchEvent(new PopStateEvent('popstate'));
+        setTimeout(() => {
+          history.pushState(null, '', this._sourceUrl);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }, 100);
       });
     }
     this.style.position = 'relative';
@@ -444,7 +455,7 @@ class LinkedCard extends LinkedBase {
   }
 
   _onHassUpdated(hass) {
-    if (this._childCard) this._childCard.hass = hass;
+    if (this._childCard && isHassReady(hass)) this._childCard.hass = hass;
   }
 
   _onElementReused(cached) {
@@ -484,7 +495,7 @@ class LinkedCard extends LinkedBase {
 
     const helpers = await getHelpers();
     const card    = helpers.createCardElement(cardConfig);
-    card.hass     = this._hass;
+    if (isHassReady(this._hass)) card.hass = this._hass;
 
     const key       = this._elementCacheKey();
     this._cacheKey  = key;
@@ -544,7 +555,7 @@ class LinkedSection extends LinkedBase {
   }
 
   _onHassUpdated(hass) {
-    for (const card of this._childCards) card.hass = hass;
+    if (isHassReady(hass)) for (const card of this._childCards) card.hass = hass;
   }
 
   _onElementReused(cached) {
@@ -603,7 +614,7 @@ class LinkedSection extends LinkedBase {
     this._childCards = [];
     for (const cardConfig of cards) {
       const card = helpers.createCardElement(cardConfig);
-      card.hass  = this._hass;
+      if (isHassReady(this._hass)) card.hass = this._hass;
       this._childCards.push(card);
       wrapper.appendChild(card);
     }
@@ -882,8 +893,10 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
         // Navigate to the source view
         const url = buildViewUrl(dashboard, view, dashConfig.views);
         console.log('[linked-cards] Navigating to source view:', url);
-        history.pushState(null, '', url);
-        window.dispatchEvent(new PopStateEvent('popstate'));
+        setTimeout(() => {
+          history.pushState(null, '', url);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }, 100);
 
         setTimeout(() => {
           try {
