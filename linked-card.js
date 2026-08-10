@@ -1,14 +1,9 @@
 /**
  * linked-card - A HACS Lovelace plugin
  *
- * Two card types:
- *
  *   custom:linked-card-source
  *     Wraps any card and gives it a card_id so it can be linked from elsewhere.
- *     Use this instead of adding card_id directly to a standard card, which
- *     breaks the visual editor.
  *
- *     Source:
  *       type: custom:linked-card-source
  *       card_id: my-sensor-list
  *       card:
@@ -17,55 +12,39 @@
  *           - sensor.temperature
  *
  *   custom:linked-card
- *     Renders a source card identified by card_id.
+ *     Renders a linked copy of a source card.
  *
- *     Linked copy:
  *       type: custom:linked-card
  *       linked_card_id: my-sensor-list
  *
  *   custom:linked-section
  *     Renders all cards from a source section identified by section_id.
  *
- *     Source (add section_id to any section in a sections-layout view):
- *       section_id: bedroom-controls
- *       cards:
- *         - type: light
- *           entity: light.bedroom
- *
- *     Linked copy (place as a card anywhere):
  *       type: custom:linked-section
  *       linked_section_id: bedroom-controls
  */
 
-const CACHE_TTL_MS    = 30_000;
-const PLUGIN_VERSION  = '1.4.0';
+const CACHE_TTL_MS   = 30_000;
+const PLUGIN_VERSION = '1.6.0';
 
 // ------------------------------------------------------------------ global cache --
-// All instances share one fetch. No matter how many cards are on a view,
-// only one set of WebSocket calls is made per TTL window.
 
-let _dashboardConfigs = null;
+let _dashboardEntries = null; // [{ config, urlPath }]
 let _dashboardCacheTs = 0;
 let _dashboardPending = null;
 
-// Per-id result cache: key -> source config (card or section)
-// key: `card::<id>` or `section::<id>`
+// Per-id result cache: key -> { config, location } | null
 const _resultCache = new Map();
 
 // Rendered element cache: key -> { element, childCards }
-// Keeps built card/section elements alive between view switches so
-// navigating back to a view is instant - no re-fetch, no re-render.
 const _elementCache = new Map();
 
-// Pre-warmed card helpers promise - resolved once, reused everywhere
+// Pre-warmed helpers promise
 let _helpersPromise = null;
-
 function getHelpers() {
   if (!_helpersPromise) _helpersPromise = window.loadCardHelpers();
   return _helpersPromise;
 }
-
-// Pre-warm helpers immediately at module load time
 getHelpers();
 
 // ------------------------------------------------------------------ helpers --
@@ -77,60 +56,61 @@ function cloneWithout(obj, ...keys) {
 }
 
 function isDashboardCacheValid() {
-  return _dashboardConfigs !== null && Date.now() - _dashboardCacheTs < CACHE_TTL_MS;
+  return _dashboardEntries !== null && Date.now() - _dashboardCacheTs < CACHE_TTL_MS;
 }
 
 /**
- * Returns all readable dashboard configs.
- * Concurrent callers all await the same in-flight promise.
- * Results are cached for CACHE_TTL_MS.
+ * Returns [{ config, urlPath }] for all readable dashboards.
+ * urlPath is null for the default dashboard.
+ * All callers share one in-flight promise.
  */
-async function getDashboardConfigs(hass) {
-  if (isDashboardCacheValid()) return _dashboardConfigs;
+async function getDashboardEntries(hass) {
+  if (isDashboardCacheValid()) return _dashboardEntries;
   if (_dashboardPending) return _dashboardPending;
 
   _dashboardPending = (async () => {
-    let paths;
+    let urlPaths;
     try {
       const dashboards = await hass.callWS({ type: 'lovelace/dashboards/list' });
-      paths = [null, ...dashboards.map((d) => d.url_path)];
+      urlPaths = [null, ...dashboards.map((d) => d.url_path)];
     } catch {
-      paths = [null];
+      urlPaths = [null];
     }
 
-    const configs = [];
-    for (const urlPath of paths) {
+    const entries = [];
+    for (const urlPath of urlPaths) {
       try {
         const config = await hass.callWS({ type: 'lovelace/config', url_path: urlPath });
-        configs.push(config);
+        entries.push({ config, urlPath });
       } catch {
         // YAML-managed or inaccessible - skip
       }
     }
 
-    _dashboardConfigs = configs;
+    _dashboardEntries = entries;
     _dashboardCacheTs = Date.now();
     _dashboardPending = null;
-    return configs;
+    return entries;
   })();
 
   return _dashboardPending;
 }
 
 /**
- * Pre-warm dashboard configs as soon as we have a hass instance.
- * Called the first time any card receives hass, before it even starts loading.
+ * Builds the URL to navigate to a specific view.
+ * urlPath: null = default dashboard (/lovelace), otherwise the custom path.
+ * view: the view object (may have a .path property, otherwise use index).
+ * viewIndex: fallback index if view has no path.
  */
-let _prewarmed = false;
-function prewarmIfNeeded(hass) {
-  if (_prewarmed || isDashboardCacheValid()) return;
-  _prewarmed = true;
-  getDashboardConfigs(hass);
+function buildViewUrl(urlPath, view, viewIndex) {
+  const base = urlPath === null ? '/lovelace' : `/${urlPath}`;
+  const slug  = view?.path ?? viewIndex;
+  return `${base}/${slug}`;
 }
 
 /** Bust all caches - used on retry */
 function bustCache(elementCacheKey, resultCacheKey) {
-  _dashboardConfigs = null;
+  _dashboardEntries = null;
   _dashboardCacheTs = 0;
   _dashboardPending = null;
   _prewarmed        = false;
@@ -140,41 +120,58 @@ function bustCache(elementCacheKey, resultCacheKey) {
 
 // --------------------------------------------------------- card search ------
 
+/**
+ * Searches a list of cards for one matching cardId.
+ * Returns { config } or null.
+ */
 function searchCardsInList(cards, cardId) {
   for (const card of cards ?? []) {
-    // Match wrapper source cards (preferred - no visual editor warning)
+    // Preferred: custom:linked-card-source wrapper
     if (card.type === 'custom:linked-card-source' && card.card_id === cardId && card.card) {
-      return card.card;
+      return { config: card.card };
     }
-    // Also match legacy card_id on standard cards for backwards compatibility
-    if (card.card_id === cardId) return cloneWithout(card, 'card_id');
+    // Legacy: card_id directly on any card (backwards compatible)
+    if (card.card_id === cardId) {
+      return { config: cloneWithout(card, 'card_id') };
+    }
+    // Recurse into container cards
     const nested =
       searchCardsInList(card.cards, cardId) ||
-      (card.card ? searchCardsInList([card.card], cardId) : null);
+      (card.card && card.type !== 'custom:linked-card-source'
+        ? searchCardsInList([card.card], cardId)
+        : null);
     if (nested) return nested;
   }
   return null;
 }
 
-function searchCardInDashboard(config, cardId) {
-  for (const view of config?.views ?? []) {
+/**
+ * Searches all views in a dashboard config for a card matching cardId.
+ * Returns { config, viewUrl } or null.
+ */
+function searchCardInDashboard(dashboardEntry, cardId) {
+  const { config, urlPath } = dashboardEntry;
+  const views = config?.views ?? [];
+  for (let i = 0; i < views.length; i++) {
+    const view = views[i];
     const inCards = searchCardsInList(view.cards, cardId);
-    if (inCards) return inCards;
+    if (inCards) return { config: inCards.config, viewUrl: buildViewUrl(urlPath, view, i) };
+
     for (const section of view.sections ?? []) {
       const inSection = searchCardsInList(section.cards, cardId);
-      if (inSection) return inSection;
+      if (inSection) return { config: inSection.config, viewUrl: buildViewUrl(urlPath, view, i) };
     }
   }
   return null;
 }
 
-async function findCardConfigById(hass, cardId) {
+async function findCardById(hass, cardId) {
   const cacheKey = `card::${cardId}`;
   if (_resultCache.has(cacheKey)) return _resultCache.get(cacheKey);
 
-  const configs = await getDashboardConfigs(hass);
-  for (const config of configs) {
-    const found = searchCardInDashboard(config, cardId);
+  const entries = await getDashboardEntries(hass);
+  for (const entry of entries) {
+    const found = searchCardInDashboard(entry, cardId);
     if (found) {
       _resultCache.set(cacheKey, found);
       return found;
@@ -186,22 +183,34 @@ async function findCardConfigById(hass, cardId) {
 
 // --------------------------------------------------------- section search ---
 
-function searchSectionInDashboard(config, sectionId) {
-  for (const view of config?.views ?? []) {
+/**
+ * Searches all views in a dashboard config for a section matching sectionId.
+ * Returns { config, viewUrl } or null.
+ */
+function searchSectionInDashboard(dashboardEntry, sectionId) {
+  const { config, urlPath } = dashboardEntry;
+  const views = config?.views ?? [];
+  for (let i = 0; i < views.length; i++) {
+    const view = views[i];
     for (const section of view.sections ?? []) {
-      if (section.section_id === sectionId) return cloneWithout(section, 'section_id');
+      if (section.section_id === sectionId) {
+        return {
+          config:  cloneWithout(section, 'section_id'),
+          viewUrl: buildViewUrl(urlPath, view, i),
+        };
+      }
     }
   }
   return null;
 }
 
-async function findSectionConfigById(hass, sectionId) {
+async function findSectionById(hass, sectionId) {
   const cacheKey = `section::${sectionId}`;
   if (_resultCache.has(cacheKey)) return _resultCache.get(cacheKey);
 
-  const configs = await getDashboardConfigs(hass);
-  for (const config of configs) {
-    const found = searchSectionInDashboard(config, sectionId);
+  const entries = await getDashboardEntries(hass);
+  for (const entry of entries) {
+    const found = searchSectionInDashboard(entry, sectionId);
     if (found) {
       _resultCache.set(cacheKey, found);
       return found;
@@ -211,6 +220,15 @@ async function findSectionConfigById(hass, sectionId) {
   return null;
 }
 
+// --------------------------------------------------- pre-warm on first hass --
+
+let _prewarmed = false;
+function prewarmIfNeeded(hass) {
+  if (_prewarmed || isDashboardCacheValid()) return;
+  _prewarmed = true;
+  getDashboardEntries(hass);
+}
+
 // ---------------------------------------------------- shared base class -----
 
 class LinkedBase extends HTMLElement {
@@ -218,38 +236,41 @@ class LinkedBase extends HTMLElement {
     super();
     this._config    = null;
     this._hass      = null;
-    this._state     = 'idle'; // idle | loading | ready | error
-    this._cacheKey  = null;   // element cache key for this instance
+    this._state     = 'idle';
+    this._cacheKey  = null;
+    this._sourceUrl = null; // URL to navigate to for editing the source
   }
 
   set hass(hass) {
     this._hass = hass;
-    // Pre-warm dashboard configs immediately on first hass
     prewarmIfNeeded(hass);
     this._onHassUpdated(hass);
     if (this._state === 'idle') this._load();
+    else if (this._state === 'ready') this._syncEditOverlay();
   }
 
   _onHassUpdated(_hass) {}
 
   _resetForNewId() {
-    this._cacheKey = null;
-    this._state    = 'idle';
+    this._cacheKey  = null;
+    this._sourceUrl = null;
+    this._state     = 'idle';
     if (this._hass) this._load();
   }
 
   async _load() {
     if (!this._hass || !this._config) return;
 
-    // If we already have a built element for this id, reattach it instantly
+    // Reattach cached element if available
     if (this._cacheKey && _elementCache.has(this._cacheKey)) {
       const cached = _elementCache.get(this._cacheKey);
+      this._sourceUrl = cached.sourceUrl;
       this._onElementReused(cached);
       this._state    = 'ready';
       this.innerHTML = '';
       this.appendChild(cached.element);
-      // Still propagate current hass state
       this._onHassUpdated(this._hass);
+      this._syncEditOverlay();
       return;
     }
 
@@ -257,16 +278,97 @@ class LinkedBase extends HTMLElement {
     this._renderLoading();
     try {
       await this._doLoad();
+      if (this._state === 'ready') this._syncEditOverlay();
     } catch (err) {
       this._renderError(`Unexpected error: ${err.message}`);
       this._state = 'error';
     }
   }
 
-  // Called when an element is pulled from cache on reattach
   _onElementReused(_cached) {}
-
   async _doLoad() {}
+
+  // Shows or hides the edit-mode overlay depending on hass.editMode
+  _syncEditOverlay() {
+    const overlay = this.querySelector('.lc-edit-overlay');
+    if (this._hass?.editMode && this._state === 'ready') {
+      if (!overlay) this._addEditOverlay();
+    } else {
+      overlay?.remove();
+    }
+  }
+
+  _addEditOverlay() {
+    const label   = this._kind === 'card' ? 'Linked Card' : 'Linked Section';
+    const sourceId = this._kind === 'card'
+      ? this._config.linked_card_id
+      : this._config.linked_section_id;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'lc-edit-overlay';
+    overlay.innerHTML = `
+      <ha-icon icon="mdi:link-variant"></ha-icon>
+      <span class="lc-edit-label">${label}: <strong>${sourceId}</strong></span>
+      ${this._sourceUrl
+        ? `<button class="lc-edit-btn">Edit source</button>`
+        : `<span class="lc-edit-unknown">Source location unknown</span>`
+      }
+      <style>
+        .lc-edit-overlay {
+          position: absolute;
+          top: 0; left: 0; right: 0;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 6px 10px;
+          background: var(--primary-color, #2196f3);
+          color: #fff;
+          font-size: 12px;
+          font-weight: 500;
+          z-index: 10;
+          border-radius: var(--ha-card-border-radius, 4px) var(--ha-card-border-radius, 4px) 0 0;
+          box-sizing: border-box;
+          pointer-events: all;
+        }
+        .lc-edit-overlay ha-icon {
+          --mdc-icon-size: 16px;
+          flex-shrink: 0;
+        }
+        .lc-edit-label {
+          flex: 1;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .lc-edit-btn {
+          background: rgba(255,255,255,0.2);
+          border: 1px solid rgba(255,255,255,0.5);
+          color: #fff;
+          border-radius: 4px;
+          padding: 2px 8px;
+          font-size: 11px;
+          cursor: pointer;
+          flex-shrink: 0;
+          white-space: nowrap;
+        }
+        .lc-edit-btn:hover { background: rgba(255,255,255,0.35); }
+        .lc-edit-unknown { opacity: 0.7; font-size: 11px; flex-shrink: 0; }
+      </style>
+    `;
+
+    if (this._sourceUrl) {
+      overlay.querySelector('.lc-edit-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        history.pushState(null, '', this._sourceUrl);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      });
+    }
+
+    // The host element needs relative positioning for the overlay to work
+    this.style.position = 'relative';
+    this.style.display  = 'block';
+    this.insertBefore(overlay, this.firstChild);
+  }
 
   _renderLoading() {
     this.innerHTML = `
@@ -296,8 +398,9 @@ class LinkedBase extends HTMLElement {
     `;
     this.querySelector('.lc-retry')?.addEventListener('click', () => {
       bustCache(elementCacheKey, resultCacheKey);
-      this._cacheKey = null;
-      this._state    = 'idle';
+      this._cacheKey  = null;
+      this._sourceUrl = null;
+      this._state     = 'idle';
       this._load();
     });
   }
@@ -360,21 +463,21 @@ class LinkedCard extends LinkedBase {
   }
 
   async _doLoad() {
-    const id          = this._config.linked_card_id;
-    const elementKey  = `card::${id}`;
-    const sourceConfig = await findCardConfigById(this._hass, id);
+    const id         = this._config.linked_card_id;
+    const elementKey = `card::${id}`;
+    const found      = await findCardById(this._hass, id);
 
-    if (!sourceConfig) {
+    if (!found) {
       this._renderError(
         `No card found with card_id: "${id}". ` +
-        `Make sure the source card has card_id set and is on a UI-managed dashboard.`,
+        `Make sure the source is a custom:linked-card-source card on a UI-managed dashboard.`,
         elementKey, `card::${id}`
       );
       this._state = 'error';
       return;
     }
 
-    if (sourceConfig.type === 'custom:linked-card') {
+    if (found.config.type === 'custom:linked-card') {
       this._renderError(
         `Circular reference: card_id "${id}" points to another linked-card.`,
         elementKey, `card::${id}`
@@ -384,13 +487,14 @@ class LinkedCard extends LinkedBase {
     }
 
     const helpers = await getHelpers();
-    const card    = helpers.createCardElement(sourceConfig);
+    const card    = helpers.createCardElement(found.config);
     card.hass     = this._hass;
 
-    // Store in element cache so next view switch is instant
     this._cacheKey  = elementKey;
+    this._sourceUrl = found.viewUrl;
     this._childCard = card;
-    _elementCache.set(elementKey, { element: card, childCard: card });
+
+    _elementCache.set(elementKey, { element: card, childCard: card, sourceUrl: found.viewUrl });
 
     this._state    = 'ready';
     this.innerHTML = '';
@@ -433,9 +537,9 @@ class LinkedSection extends LinkedBase {
   async _doLoad() {
     const id         = this._config.linked_section_id;
     const elementKey = `section::${id}`;
-    const section    = await findSectionConfigById(this._hass, id);
+    const found      = await findSectionById(this._hass, id);
 
-    if (!section) {
+    if (!found) {
       this._renderError(
         `No section found with section_id: "${id}". ` +
         `Make sure the source section has section_id set and is on a UI-managed dashboard.`,
@@ -445,7 +549,7 @@ class LinkedSection extends LinkedBase {
       return;
     }
 
-    const cards = section.cards ?? [];
+    const cards = found.config.cards ?? [];
     if (cards.length === 0) {
       this._renderError(`Section "${id}" exists but has no cards.`, elementKey, `section::${id}`);
       this._state = 'error';
@@ -456,10 +560,10 @@ class LinkedSection extends LinkedBase {
     const wrapper  = document.createElement('div');
     wrapper.className = 'linked-section-wrapper';
 
-    if (section.title) {
+    if (found.config.title) {
       const heading       = document.createElement('div');
       heading.className   = 'linked-section-title';
-      heading.textContent = section.title;
+      heading.textContent = found.config.title;
       wrapper.appendChild(heading);
     }
 
@@ -471,9 +575,14 @@ class LinkedSection extends LinkedBase {
       wrapper.appendChild(card);
     }
 
-    // Store wrapper in element cache
-    this._cacheKey = elementKey;
-    _elementCache.set(elementKey, { element: wrapper, childCards: this._childCards });
+    this._cacheKey  = elementKey;
+    this._sourceUrl = found.viewUrl;
+
+    _elementCache.set(elementKey, {
+      element:    wrapper,
+      childCards: this._childCards,
+      sourceUrl:  found.viewUrl,
+    });
 
     this._state    = 'ready';
     this.innerHTML = `
@@ -500,6 +609,97 @@ class LinkedSection extends LinkedBase {
   static getStubConfig()    { return { linked_section_id: '' }; }
 }
 
+// -------------------------------------------------------- LinkedCardSource ----
+
+class LinkedCardSource extends HTMLElement {
+  constructor() {
+    super();
+    this._config    = null;
+    this._hass      = null;
+    this._childCard = null;
+  }
+
+  setConfig(config) {
+    if (!config.card_id) throw new Error('[linked-card-source] card_id is required.');
+    if (!config.card)    throw new Error('[linked-card-source] card is required.');
+    this._config = config;
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._childCard) this._childCard.hass = hass;
+  }
+
+  async _render() {
+    if (!this._config?.card) return;
+    const helpers   = await getHelpers();
+    const card      = helpers.createCardElement(this._config.card);
+    if (this._hass) card.hass = this._hass;
+    this._childCard = card;
+    this.innerHTML  = '';
+    this.appendChild(card);
+  }
+
+  getCardSize() { return this._childCard?.getCardSize?.() ?? 1; }
+
+  static getConfigElement() { return document.createElement('linked-card-source-editor'); }
+  static getStubConfig()    { return { card_id: '', card: { type: 'entities', entities: [] } }; }
+}
+
+class LinkedCardSourceEditor extends HTMLElement {
+  constructor() {
+    super();
+    this._config = {};
+  }
+
+  setConfig(config) {
+    this._config = config;
+    this._render();
+  }
+
+  set hass(_hass) {}
+
+  _render() {
+    const currentId = this._config.card_id ?? '';
+    this.innerHTML = `
+      <div class="lc-editor">
+        <p class="lc-hint">
+          Give this source card a unique ID. Then reference it from any dashboard using
+          <code>custom:linked-card</code> with <code>linked_card_id: ${currentId || 'your-id'}</code>.
+        </p>
+        <label class="lc-label">
+          Card ID
+          <input type="text" class="lc-input" placeholder="e.g. living-room-sensors" value="${currentId}" />
+        </label>
+        <p class="lc-hint" style="margin-top:12px">
+          The inner card is configured via the <code>card:</code> key in YAML.
+        </p>
+      </div>
+      <style>
+        .lc-editor { padding: 8px 0; font-size: 14px; }
+        .lc-hint { color: var(--secondary-text-color); margin: 0 0 6px; font-size: 12px; line-height: 1.5; }
+        .lc-hint code { background: var(--code-editor-background-color, #f5f5f5); padding: 1px 4px; border-radius: 3px; }
+        .lc-label { display: flex; flex-direction: column; gap: 6px; font-weight: 500; }
+        .lc-input {
+          padding: 8px; margin-top: 4px;
+          border: 1px solid var(--divider-color); border-radius: 4px;
+          background: var(--card-background-color); color: var(--primary-text-color);
+          font-size: 14px; width: 100%; box-sizing: border-box;
+        }
+      </style>
+    `;
+
+    this.querySelector('.lc-input').addEventListener('change', (e) => {
+      this.dispatchEvent(new CustomEvent('config-changed', {
+        detail: { config: { ...this._config, card_id: e.target.value.trim() } },
+        bubbles: true,
+        composed: true,
+      }));
+    });
+  }
+}
+
 // --------------------------------------------------------- shared editor ----
 
 function buildEditor(elementName, idField, label, hint, collectFn) {
@@ -524,10 +724,10 @@ function buildEditor(elementName, idField, label, hint, collectFn) {
 
     async _loadIds() {
       if (!this._hass || this._loading) return;
-      this._loading = true;
-      const ids     = [];
-      const configs = await getDashboardConfigs(this._hass);
-      for (const config of configs) collectFn(config, ids);
+      this._loading  = true;
+      const ids      = [];
+      const entries  = await getDashboardEntries(this._hass);
+      for (const { config } of entries) collectFn(config, ids);
       this._ids     = [...new Set(ids)].sort();
       this._loading = false;
       this._render();
@@ -589,7 +789,7 @@ function buildEditor(elementName, idField, label, hint, collectFn) {
       const input  = this.querySelector('.lc-input');
       const select = this.querySelector('.lc-select');
 
-      input.addEventListener('change', (e) => this._fire(e.target.value.trim()));
+      input.addEventListener('change',  (e) => this._fire(e.target.value.trim()));
       select?.addEventListener('change', (e) => {
         if (e.target.value) { input.value = e.target.value; this._fire(e.target.value); }
       });
@@ -612,7 +812,6 @@ function collectCardIds(config, ids) {
     for (const card of cards ?? []) {
       if (card.card_id) ids.push(card.card_id);
       walk(card.cards);
-      // Don't recurse into linked-card-source's inner card to avoid double-counting
       if (card.card && card.type !== 'custom:linked-card-source') walk([card.card]);
     }
   }
@@ -646,110 +845,12 @@ buildEditor(
   collectSectionIds
 );
 
-
-// -------------------------------------------------------- LinkedCardSource ----
-// Wraps any card and exposes a card_id so linked-card can find it.
-// Renders identically to the inner card - invisible to the user.
-
-class LinkedCardSource extends HTMLElement {
-  constructor() {
-    super();
-    this._config    = null;
-    this._hass      = null;
-    this._childCard = null;
-  }
-
-  setConfig(config) {
-    if (!config.card_id) throw new Error('[linked-card-source] card_id is required.');
-    if (!config.card)    throw new Error('[linked-card-source] card is required.');
-    this._config = config;
-    this._render();
-  }
-
-  set hass(hass) {
-    this._hass = hass;
-    if (this._childCard) this._childCard.hass = hass;
-  }
-
-  async _render() {
-    if (!this._config?.card) return;
-    const helpers   = await getHelpers();
-    const card      = helpers.createCardElement(this._config.card);
-    if (this._hass) card.hass = this._hass;
-    this._childCard = card;
-    this.innerHTML  = '';
-    this.appendChild(card);
-  }
-
-  getCardSize() { return this._childCard?.getCardSize?.() ?? 1; }
-
-  static getConfigElement() { return document.createElement('linked-card-source-editor'); }
-  static getStubConfig()    { return { card_id: '', card: { type: 'entities', entities: [] } }; }
-}
-
-class LinkedCardSourceEditor extends HTMLElement {
-  constructor() {
-    super();
-    this._config = {};
-    this._hass   = null;
-  }
-
-  setConfig(config) {
-    this._config = config;
-    this._render();
-  }
-
-  set hass(hass) {
-    this._hass = hass;
-  }
-
-  _render() {
-    const currentId = this._config.card_id || '';
-    this.innerHTML = `
-      <div class="lc-editor">
-        <p class="lc-hint">
-          Give this source card a unique ID. Then reference it from any dashboard using
-          <code>custom:linked-card</code> with <code>linked_card_id: ${currentId || 'your-id'}</code>.
-        </p>
-        <label class="lc-label">
-          Card ID
-          <input type="text" class="lc-input" placeholder="e.g. living-room-sensors" value="${currentId}" />
-        </label>
-        <p class="lc-hint" style="margin-top:12px">
-          The inner card is configured via the <code>card:</code> key in YAML.
-        </p>
-      </div>
-      <style>
-        .lc-editor { padding: 8px 0; font-size: 14px; }
-        .lc-hint { color: var(--secondary-text-color); margin: 0 0 6px; font-size: 12px; line-height: 1.5; }
-        .lc-hint code { background: var(--code-editor-background-color, #f5f5f5); padding: 1px 4px; border-radius: 3px; }
-        .lc-label { display: flex; flex-direction: column; gap: 6px; font-weight: 500; }
-        .lc-input {
-          padding: 8px; margin-top: 4px;
-          border: 1px solid var(--divider-color); border-radius: 4px;
-          background: var(--card-background-color); color: var(--primary-text-color);
-          font-size: 14px; width: 100%; box-sizing: border-box;
-        }
-      </style>
-    `;
-
-    this.querySelector('.lc-input').addEventListener('change', (e) => {
-      this.dispatchEvent(new CustomEvent('config-changed', {
-        detail: { config: { ...this._config, card_id: e.target.value.trim() } },
-        bubbles: true,
-        composed: true,
-      }));
-    });
-  }
-}
+// ---------------------------------------------------------------- register --
 
 customElements.define('linked-card-source',        LinkedCardSource);
 customElements.define('linked-card-source-editor', LinkedCardSourceEditor);
-
-// ---------------------------------------------------------------- register --
-
-customElements.define('linked-card',    LinkedCard);
-customElements.define('linked-section', LinkedSection);
+customElements.define('linked-card',               LinkedCard);
+customElements.define('linked-section',            LinkedSection);
 
 window.customCards = window.customCards || [];
 window.customCards.push(
