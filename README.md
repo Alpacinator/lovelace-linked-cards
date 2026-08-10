@@ -14,18 +14,23 @@
 
 ## Card types
 
-| Type | What it links | Source marker |
+| Type | Role | Identified by |
 |---|---|---|
-| `custom:linked-card` | A single card | `card_id` on the source card |
-| `custom:linked-section` | All cards in a section | `section_id` on the source section |
+| `custom:linked-card-source` | Defines the source card | `card_id` on the wrapper |
+| `custom:linked-card` | Renders a linked copy of the source | `linked_card_id` |
+| `custom:linked-section` | Renders all cards from a source section | `linked_section_id` |
 
 ## Quick start
 
-Label any existing card with a `card_id`:
+Wrap any card with `custom:linked-card-source` and give it a `card_id`:
 
 ```yaml
-type: entities
+type: custom:linked-card-source
 card_id: my-card
+card:
+  type: entities
+  entities:
+    - sensor.temperature
 ```
 
 Or label any existing section with a `section_id`:
@@ -73,20 +78,24 @@ Both **Linked Card** and **Linked Section** appear in the Home Assistant card pi
 > [!NOTE]
 > The dropdown only shows IDs from UI-managed (storage-mode) dashboards. YAML-mode dashboards are not readable via the WebSocket API.
 
-### custom:linked-card
+### custom:linked-card-source
 
-Add `card_id` to any existing card to make it the source:
+Wrap any card to give it a `card_id`. This is the recommended way to define a source card as it works fully with the visual editor:
 
 ```yaml
-type: entities
+type: custom:linked-card-source
 card_id: living-room-sensors
-title: Living Room
-entities:
-  - sensor.temperature
-  - sensor.humidity
+card:
+  type: entities
+  title: Living Room
+  entities:
+    - sensor.temperature
+    - sensor.humidity
 ```
 
-Then place a linked copy anywhere on any dashboard:
+### custom:linked-card
+
+Place a linked copy anywhere on any dashboard:
 
 ```yaml
 type: custom:linked-card
