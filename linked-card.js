@@ -235,15 +235,14 @@ function findCardByIdInList(cards, cardId) {
 }
 
 function findCardByIdInView(view, cardId) {
-  // Search top-level cards first
-  const inCards = findCardByIdInList(view?.cards, cardId);
-  if (inCards) return inCards;
-  // Also search inside sections (sections layout)
-  for (const section of view?.sections ?? []) {
-    const inSection = findCardByIdInList(section.cards, cardId);
-    if (inSection) return inSection;
+  const lists = [view?.cards, ...(view?.sections ?? []).map((s) => s.cards)];
+  const matches = [];
+  for (const list of lists) {
+    (list ?? []).forEach((c, i) => {
+      if (getCardId(c, i) === cardId) matches.push(c);
+    });
   }
-  return null;
+  return matches.find((c) => c.type !== 'heading') ?? matches[0] ?? null;
 }
 
 function findSectionByIdInView(view, sectionId) {
