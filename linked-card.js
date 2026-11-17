@@ -18,8 +18,10 @@
  *       section: "My Section"    # section title
  */
 
-const CACHE_TTL_MS   = 30_000;
-const PLUGIN_VERSION = '2.7.1';
+const CACHE_TTL_MS        = 30_000;
+const PLUGIN_VERSION      = '2.7.2';
+const RETRY_DELAY_MS      = 5_000;   // min time between automatic retries after an error
+const MAX_AUTO_RETRIES    = 5;       // automatic retries before waiting for a manual Retry
 
 // ----------------------------------------------------------------- version check --
 // Compares the running version against the last seen version in localStorage.
@@ -48,20 +50,35 @@ function isHassReady(hass) {
   return hass && hass.auth && hass.states && hass.callWS;
 }
 
+// Escape text before interpolating it into innerHTML templates.
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
 // ------------------------------------------------------------------ global cache --
 
 // Map of pathKey -> { config, ts } | Promise
+// Only dashboard CONFIG is cached globally. DOM elements are never shared between
+// instances: every linked card/section builds its own child elements, so several
+// links to the same source can coexist.
 const _dashboardCache = new Map();
-
-// Map of cacheKey -> { element, sourceConfigJson, childCards, sourceUrl }
-const _elementCache   = new Map();
 
 let _helpersPromise = null;
 function getHelpers() {
-  if (!_helpersPromise) _helpersPromise = window.loadCardHelpers();
+  if (!_helpersPromise) {
+    _helpersPromise = Promise.resolve()
+      .then(() => window.loadCardHelpers())
+      .catch((err) => {
+        // Don't cache a failure forever, allow the next call to try again.
+        _helpersPromise = null;
+        throw err;
+      });
+  }
   return _helpersPromise;
 }
-getHelpers();
+getHelpers().catch(() => {});
 
 // ------------------------------------------------------------------ helpers --
 
@@ -268,64 +285,67 @@ class LinkedBase extends HTMLElement {
     super();
     this._config    = null;
     this._hass      = null;
-    this._state     = 'idle';
-    this._cacheKey  = null;
+    this._state     = 'idle';   // idle | loading | ready | error
     this._sourceUrl = null;
+    this._loadToken = 0;        // incremented on every load, lets stale loads bail out
+    this._errorTs   = 0;        // when the last error was rendered
+    this._retries   = 0;        // automatic retries since the last config change / manual retry
   }
 
   set hass(hass) {
     this._hass = hass;
     this._onHassUpdated(hass);
-    if (this._state === 'idle') this._load();
-    else if (this._state === 'ready') this._syncEditOverlay();
+
+    if (this._state === 'idle') {
+      this._load();
+    } else if (this._state === 'ready') {
+      this._syncEditOverlay();
+    } else if (
+      this._state === 'error' &&
+      this._retries < MAX_AUTO_RETRIES &&
+      Date.now() - this._errorTs > RETRY_DELAY_MS
+    ) {
+      // Transient failures (HA starting up, websocket reconnecting) shouldn't leave
+      // the card broken until the user clicks Retry.
+      this._retries++;
+      bustDashboardCache(this._config?.dashboard ?? null);
+      this._state = 'idle';
+      this._load();
+    }
+
     _notifyReloadIfNeeded(hass);
   }
 
   _onHassUpdated(_hass) {}
 
   _resetForConfig() {
-    this._cacheKey  = null;
     this._sourceUrl = null;
     this._state     = 'idle';
+    this._retries   = 0;
     if (this._hass) this._load();
   }
-
-  _elementCacheKey() { return null; }
 
   async _load() {
     if (!this._hass || !this._config) return;
 
-    const key = this._elementCacheKey();
-    if (key && _elementCache.has(key)) {
-      const cached          = _elementCache.get(key);
-      const currentJson     = await this._getSourceConfigJson();
-      if (currentJson === cached.sourceConfigJson) {
-        this._sourceUrl = cached.sourceUrl;
-        this._onElementReused(cached);
-        this._state    = 'ready';
-        this.innerHTML = '';
-        this.appendChild(cached.element);
-        this._onHassUpdated(this._hass);
-        this._syncEditOverlay();
-        return;
-      }
-      _elementCache.delete(key);
-    }
-
+    const token = ++this._loadToken;
     this._state = 'loading';
     this._renderLoading();
+
     try {
-      await this._doLoad();
+      await this._doLoad(token);
+      if (token !== this._loadToken) return;   // superseded by a newer load
       if (this._state === 'ready') this._syncEditOverlay();
     } catch (err) {
+      if (token !== this._loadToken) return;
       this._renderError(`Unexpected error: ${err.message}`);
       this._state = 'error';
     }
   }
 
-  async _getSourceConfigJson() { return null; }
-  _onElementReused(_cached)    {}
-  async _doLoad()              {}
+  // Subclasses must check `token !== this._loadToken` after every await and return
+  // early if it no longer matches.
+  async _doLoad(_token) {}
 
   _syncEditOverlay() {
     const overlay = this.querySelector('.lc-edit-overlay');
@@ -382,7 +402,7 @@ class LinkedBase extends HTMLElement {
       <ha-card>
         <div class="lc-message">
           <ha-icon icon="mdi:link-variant"></ha-icon>
-          <span>${message}</span>
+          <span>${esc(message)}</span>
         </div>
       </ha-card>
       ${sharedStyles()}
@@ -402,13 +422,14 @@ class LinkedBase extends HTMLElement {
   }
 
   _renderError(message, urlPath) {
+    this._errorTs = Date.now();
     this.innerHTML = `
       <ha-card>
         <div class="lc-error">
           <ha-icon icon="mdi:link-variant-off"></ha-icon>
           <div>
             <strong>Linked ${capitalize(this._kind)}</strong>
-            <p>${message}</p>
+            <p>${esc(message)}</p>
             <button class="lc-retry">Retry</button>
           </div>
         </div>
@@ -416,10 +437,9 @@ class LinkedBase extends HTMLElement {
       ${sharedStyles()}
     `;
     this.querySelector('.lc-retry')?.addEventListener('click', () => {
-      if (urlPath !== undefined) bustDashboardCache(urlPath);
-      if (this._cacheKey) _elementCache.delete(this._cacheKey);
-      this._cacheKey  = null;
+      bustDashboardCache(urlPath !== undefined ? urlPath : (this._config?.dashboard ?? null));
       this._sourceUrl = null;
+      this._retries   = 0;
       this._state     = 'idle';
       this._load();
     });
@@ -476,28 +496,11 @@ class LinkedCard extends LinkedBase {
     }
   }
 
-  _elementCacheKey() {
-    const { dashboard = null, view, card } = this._config;
-    return `card::${pathKey(dashboard)}::${view}::${card}`;
-  }
-
-  async _getSourceConfigJson() {
-    const { dashboard = null, view: viewId, card: cardId } = this._config;
-    const dashConfig = await getDashboardConfig(this._hass, dashboard);
-    const view       = findViewByIdInConfig(dashConfig, viewId);
-    const card       = findCardByIdInView(view, cardId);
-    return card ? JSON.stringify(card) : null;
-  }
-
   _onHassUpdated(hass) {
     if (this._childCard && isHassReady(hass)) this._childCard.hass = hass;
   }
 
-  _onElementReused(cached) {
-    this._childCard = cached.childCard;
-  }
-
-  async _doLoad() {
+  async _doLoad(token) {
     const { dashboard = null, view: viewId, card: cardId } = this._config;
 
     if (!cardId || !viewId) {
@@ -507,6 +510,7 @@ class LinkedCard extends LinkedBase {
     }
 
     const dashConfig = await getDashboardConfig(this._hass, dashboard);
+    if (token !== this._loadToken) return;
 
     if (!dashConfig) {
       this._renderError('Could not load dashboard config. Is it UI-managed?', dashboard);
@@ -529,20 +533,14 @@ class LinkedCard extends LinkedBase {
     }
 
     const helpers = await getHelpers();
-    const card    = helpers.createCardElement(cardConfig);
+    if (token !== this._loadToken) return;
+
+    // Each instance creates its own element. Never share DOM nodes between instances.
+    const card = helpers.createCardElement(cardConfig);
     if (isHassReady(this._hass)) card.hass = this._hass;
 
-    const key       = this._elementCacheKey();
-    this._cacheKey  = key;
     this._sourceUrl = buildViewUrl(dashboard, view, dashConfig.views);
     this._childCard = card;
-
-    _elementCache.set(key, {
-      element:          card,
-      childCard:        card,
-      sourceConfigJson: JSON.stringify(cardConfig),
-      sourceUrl:        this._sourceUrl,
-    });
 
     this._state    = 'ready';
     this.innerHTML = '';
@@ -576,28 +574,11 @@ class LinkedSection extends LinkedBase {
     }
   }
 
-  _elementCacheKey() {
-    const { dashboard = null, view, section } = this._config;
-    return `section::${pathKey(dashboard)}::${view}::${section}`;
-  }
-
-  async _getSourceConfigJson() {
-    const { dashboard = null, view: viewId, section: sectionId } = this._config;
-    const dashConfig = await getDashboardConfig(this._hass, dashboard);
-    const view       = findViewByIdInConfig(dashConfig, viewId);
-    const section    = findSectionByIdInView(view, sectionId);
-    return section ? JSON.stringify(section) : null;
-  }
-
   _onHassUpdated(hass) {
     if (isHassReady(hass)) for (const card of this._childCards) card.hass = hass;
   }
 
-  _onElementReused(cached) {
-    this._childCards = cached.childCards;
-  }
-
-  async _doLoad() {
+  async _doLoad(token) {
     const { dashboard = null, view: viewId, section: sectionId } = this._config;
 
     if (!sectionId || !viewId) {
@@ -607,6 +588,7 @@ class LinkedSection extends LinkedBase {
     }
 
     const dashConfig = await getDashboardConfig(this._hass, dashboard);
+    if (token !== this._loadToken) return;
 
     if (!dashConfig) {
       this._renderError('Could not load dashboard config. Is it UI-managed?', dashboard);
@@ -636,6 +618,8 @@ class LinkedSection extends LinkedBase {
     }
 
     const helpers = await getHelpers();
+    if (token !== this._loadToken) return;
+
     const wrapper  = document.createElement('div');
     wrapper.className = 'linked-section-wrapper';
 
@@ -646,24 +630,16 @@ class LinkedSection extends LinkedBase {
       wrapper.appendChild(heading);
     }
 
-    this._childCards = [];
+    const childCards = [];
     for (const cardConfig of cards) {
       const card = helpers.createCardElement(cardConfig);
       if (isHassReady(this._hass)) card.hass = this._hass;
-      this._childCards.push(card);
+      childCards.push(card);
       wrapper.appendChild(card);
     }
 
-    const key       = this._elementCacheKey();
-    this._cacheKey  = key;
-    this._sourceUrl = buildViewUrl(dashboard, view, dashConfig.views);
-
-    _elementCache.set(key, {
-      element:          wrapper,
-      childCards:       this._childCards,
-      sourceConfigJson: JSON.stringify(section),
-      sourceUrl:        this._sourceUrl,
-    });
+    this._childCards = childCards;
+    this._sourceUrl  = buildViewUrl(dashboard, view, dashConfig.views);
 
     this._state    = 'ready';
     this.innerHTML = `
@@ -698,6 +674,7 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
       super();
       this._config     = {};
       this._hass       = null;
+      this._started    = false;
       this._dashboards = [];
       this._views      = [];
       this._items      = [];
@@ -705,13 +682,27 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
     }
 
     setConfig(config) {
+      const prev   = this._config ?? {};
       this._config = config;
       this._render();
+
+      // If the config was changed from outside the editor (e.g. YAML mode),
+      // refresh the dependent dropdowns. Changes made by the editor itself already
+      // updated this._config before firing, so they don't trigger a second load.
+      if (this._hass && this._started) {
+        if ((prev.dashboard ?? null) !== (config.dashboard ?? null)) this._loadViews();
+        else if ((prev.view ?? '') !== (config.view ?? '')) this._loadItems();
+      }
     }
 
     set hass(hass) {
       this._hass = hass;
-      this._loadDashboards();
+      // Only load once. hass updates arrive constantly and reloading would re-render
+      // the editor and close any open dropdown.
+      if (!this._started) {
+        this._started = true;
+        this._loadDashboards();
+      }
     }
 
     async _loadDashboards() {
@@ -771,18 +762,18 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
       const itemId    = this._config[itemField] ?? '';
 
       const dashOptions = this._dashboards.map((d) =>
-        `<option value="${d.urlPath ?? ''}" ${(d.urlPath ?? null) === dashboard ? 'selected' : ''}>${d.title}</option>`
+        `<option value="${esc(d.urlPath ?? '')}" ${(d.urlPath ?? null) === dashboard ? 'selected' : ''}>${esc(d.title)}</option>`
       ).join('') || '<option>Loading...</option>';
 
       const viewOptions = this._views.map((v, i) => {
         const id = getViewId(v, i);
-        return `<option value="${id}" ${id === viewId ? 'selected' : ''}>${getViewLabel(v, i)}</option>`;
+        return `<option value="${esc(id)}" ${id === viewId ? 'selected' : ''}>${esc(getViewLabel(v, i))}</option>`;
       }).join('') || '<option disabled>No views found</option>';
 
       const itemOptions = this._items.map((item, i) => {
         const id = getItemId(item, i);
         if (!id) return '';
-        return `<option value="${id}" ${id === itemId ? 'selected' : ''}>${getItemLabel(item, i)}</option>`;
+        return `<option value="${esc(id)}" ${id === itemId ? 'selected' : ''}>${esc(getItemLabel(item, i))}</option>`;
       }).filter(Boolean).join('') || '<option disabled>None found</option>';
 
       const itemPlaceholder = `<option value="" ${!itemId ? 'selected' : ''} disabled>-- select a ${itemField === 'card' ? 'card' : 'section'} --</option>`;
@@ -811,7 +802,7 @@ function buildEditor(elementName, itemField, itemsFromView, getItemId, getItemLa
           ${this._error ? `
             <div class="lc-error-box">
               <strong>Error loading dashboards</strong>
-              <p>${this._error}</p>
+              <p>${esc(this._error)}</p>
               <button class="lc-retry-btn">Retry</button>
             </div>
           ` : ''}
